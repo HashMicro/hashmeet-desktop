@@ -1,9 +1,9 @@
 {
-  "name": "jitsi-meet-electron",
-  "version": "2026.4.0",
-  "description": "Electron application for Jitsi Meet",
+  "name": "hashmeet-desktop",
+  "version": "0.1.0",
+  "description": "HashMeet desktop app",
   "main": "./build/main.js",
-  "productName": "Jitsi Meet",
+  "productName": "HashMeet",
   "private": true,
   "scripts": {
     "start": "webpack --config ./webpack.main.js --mode development && concurrently \"npm:watch\" \"electron ./build/main.js\"",
@@ -12,6 +12,7 @@
     "lint-fix": "eslint . --fix",
     "build": "webpack --config ./webpack.main.js --mode production && webpack --config ./webpack.renderer.js --mode production",
     "dist": "npm run build && electron-builder",
+    "icons": "node scripts/build-icons.js",
     "postinstall": "patch-package",
     "watch": "webpack --config ./webpack.renderer.js --mode development --watch --watch-options-poll=1000"
   },
@@ -19,18 +20,20 @@
     "node": ">=22.0.0"
   },
   "build": {
-    "appId": "org.jitsi.jitsi-meet",
-    "productName": "Jitsi Meet",
+    "appId": "com.hashmicro.hashmeet.desktop",
+    "productName": "HashMeet",
     "generateUpdatesFilesForAllChannels": true,
     "npmRebuild": false,
     "files": [
       "build",
       "resources",
       "!app",
+      "!brand",
+      "!scripts",
       "!main.js"
     ],
     "mac": {
-      "artifactName": "jitsi-meet.${ext}",
+      "artifactName": "HashMeet-${version}-${arch}.${ext}",
       "target": [
         {
           "arch": "universal",
@@ -45,8 +48,8 @@
       "darkModeSupport": true,
       "entitlements": "resources/entitlements.mac.plist",
       "extendInfo": {
-        "NSCameraUsageDescription": "Jitsi Meet requires access to your camera in order to make video-calls.",
-        "NSMicrophoneUsageDescription": "Jitsi Meet requires access to your microphone in order to make calls (audio/video).",
+        "NSCameraUsageDescription": "HashMeet requires access to your camera in order to make video calls.",
+        "NSMicrophoneUsageDescription": "HashMeet requires access to your microphone in order to make calls (audio/video).",
         "LSMultipleInstancesProhibited": true
       }
     },
@@ -55,38 +58,12 @@
       "entitlementsInherit": "resources/entitlements.mas.inherit.plist",
       "hardenedRuntime": false
     },
-    "linux": {
-      "artifactName": "jitsi-meet-${arch}.${ext}",
-      "category": "VideoConference;AudioVideo;Audio;Video;Network",
-      "description": "Jitsi Meet Desktop App",
-      "executableName": "jitsi-meet",
-      "target": [
-        {
-          "arch": "x64",
-          "target": "AppImage"
-        },
-        {
-          "arch": "x64",
-          "target": "deb"
-        },
-        {
-          "arch": "arm64",
-          "target": "AppImage"
-        },
-        {
-          "arch": "arm64",
-          "target": "deb"
-        }
-      ]
-    },
     "win": {
-      "artifactName": "jitsi-meet.${ext}",
+      "artifactName": "HashMeet-${version}-${arch}.${ext}",
       "target": [
         {
           "arch": [
-            "ia32",
-            "x64",
-            "arm64"
+            "x64"
           ],
           "target": "nsis"
         }
@@ -95,31 +72,34 @@
     "directories": {
       "buildResources": "resources"
     },
+    "publish": {
+      "provider": "github",
+      "owner": "HashMicro",
+      "repo": "hashmeet-desktop",
+      "releaseType": "release"
+    },
     "protocols": [
       {
-        "name": "jitsi-protocol",
+        "name": "hashmeet-protocol",
         "role": "Viewer",
         "schemes": [
-          "jitsi-meet"
+          "hashmeet"
         ]
       }
     ]
   },
-  "pre-commit": [
-    "lint"
-  ],
   "repository": {
     "type": "git",
-    "url": "git://github.com/jitsi/jitsi-meet-electron"
+    "url": "https://github.com/HashMicro/hashmeet-desktop"
   },
   "keywords": [
-    "jingle",
+    "hashmeet",
+    "hashmicro",
     "webrtc",
-    "xmpp",
     "electron",
-    "jitsi-meet"
+    "video-conferencing"
   ],
-  "author": "Jitsi Team <support@jitsi.org>",
+  "author": "HashMicro",
   "readmeFilename": "README.md",
   "license": "Apache-2.0",
   "dependencies": {
@@ -172,6 +152,7 @@
     "moment": "^2.29.2",
     "mousetrap": "^1.6.5",
     "patch-package": "8.0.1",
+    "png2icons": "^2.0.1",
     "react": "^17.0.2",
     "react-dom": "^17.0.2",
     "react-i18next": "^11.8.12",
@@ -180,6 +161,7 @@
     "redux": "^4.1.2",
     "redux-logger": "^3.0.6",
     "redux-persist": "^5.10.0",
+    "sharp": "^0.34.5",
     "source-map-support": "^0.5.19",
     "style-loader": "^3.3.1",
     "styled-components": "^3.4.10",
