@@ -190,12 +190,9 @@ function createJitsiMeetWindow() {
     // Path to root directory.
     const basePath = isDev ? __dirname : app.getAppPath();
 
-    // URL for index.html which will be our entry point.
-    const indexURL = URL.format({
-        pathname: path.resolve(basePath, './build/index.html'),
-        protocol: 'file:',
-        slashes: true
-    });
+    // HashMeet desktop loads the live Laravel webapp directly. The upstream
+    // React welcome screen at build/index.html is intentionally bypassed.
+    const indexURL = config.default.defaultServerURL;
 
     // Options used when creating the main Jitsi Meet window.
     // Use a preload script in order to provide node specific functionality
@@ -357,10 +354,10 @@ function createWebRTCInternalsWindow() {
 }
 
 /**
- * Handler for application protocol links to initiate a conference.
+ * Handler for hashmeet:// protocol links. Navigates the main window to
+ * the corresponding meet.hashmicro.com URL.
  */
 function handleProtocolCall(fullProtocolCall) {
-    // don't touch when something is bad
     if (
         !fullProtocolCall
         || fullProtocolCall.trim() === ''
@@ -369,18 +366,15 @@ function handleProtocolCall(fullProtocolCall) {
         return;
     }
 
-    const inputURL = fullProtocolCall.replace(appProtocolSurplus, '');
+    const inputURL = fullProtocolCall.replace(appProtocolSurplus, '').replace(/^\/+/, '');
+    const target = `${config.default.defaultServerURL}/${inputURL}`;
 
     if (app.isReady() && mainWindow === null) {
         createJitsiMeetWindow();
     }
 
-    protocolDataForFrontApp = inputURL;
-
-    if (rendererReady) {
-        mainWindow
-            .webContents
-            .send('protocol-data-msg', inputURL);
+    if (mainWindow) {
+        mainWindow.loadURL(target);
     }
 }
 
