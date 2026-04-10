@@ -5,13 +5,13 @@ const {
     getPopupTarget,
     setupPictureInPictureMain,
     setupRemoteControlMain,
-    setupPowerMonitorMain,
-    setupScreenSharingMain
+    setupPowerMonitorMain
 } = require('@jitsi/electron-sdk');
 const {
     BrowserWindow,
     Menu,
     app,
+    desktopCapturer,
     ipcMain
 } = require('electron');
 const contextMenu = require('electron-context-menu');
@@ -169,7 +169,99 @@ function setApplicationMenu() {
 }
 
 /**
- * Opens new window with index.html(Jitsi Meet is loaded in iframe there).
+ * Register a custom getDisplayMedia handler on the given window's session.
+ * Opens a modal picker listing screens and windows; the user clicks one and
+ * we return the selected source to the Chromium media stack.
+ *
+ * Replaces @jitsi/electron-sdk's setupScreenSharingMain which assumes the
+ * upstream Jitsi React renderer is loaded (it sends an IPC to a picker that
+ * only exists in that renderer).
+ */
+function setupScreenShareHandler(window) {
+    window.webContents.session.setDisplayMediaRequestHandler(async (request, callback) => {
+        try {
+            const sources = await desktopCapturer.getSources({
+                types: [ 'screen', 'window' ],
+                thumbnailSize: { width: 320, height: 200 },
+                fetchWindowIcons: false
+            });
+
+            if (!sources.length) {
+                callback(null);
+                return;
+            }
+
+            const picker = new BrowserWindow({
+                parent: window,
+                modal: true,
+                width: 760,
+                height: 560,
+                minWidth: 480,
+                minHeight: 360,
+                resizable: true,
+                minimizable: false,
+                maximizable: false,
+                fullscreenable: false,
+                show: false,
+                title: 'Choose what to share',
+                backgroundColor: '#1a1a1a',
+                autoHideMenuBar: true,
+                webPreferences: {
+                    contextIsolation: false,
+                    nodeIntegration: true,
+                    sandbox: false
+                }
+            });
+
+            picker.setMenuBarVisibility(false);
+            picker.loadFile(path.resolve(app.getAppPath(), 'picker', 'picker.html'));
+
+            const sourcesById = new Map();
+            sources.forEach(s => sourcesById.set(s.id, s));
+
+            const payload = sources.map(s => ({
+                id: s.id,
+                name: s.name,
+                type: s.id.startsWith('screen:') ? 'screen' : 'window',
+                thumbnail: s.thumbnail.toDataURL()
+            }));
+
+            picker.webContents.once('did-finish-load', () => {
+                picker.webContents.send('sources', payload);
+                picker.show();
+            });
+
+            let settled = false;
+            const finish = (sourceId) => {
+                if (settled) return;
+                settled = true;
+                const source = sourceId ? sourcesById.get(sourceId) : null;
+                if (source) {
+                    callback({ video: source });
+                } else {
+                    callback(null);
+                }
+                if (!picker.isDestroyed()) {
+                    picker.close();
+                }
+            };
+
+            const onSelect = (_ev, sourceId) => finish(sourceId);
+            ipcMain.once('picker:select', onSelect);
+
+            picker.on('closed', () => {
+                ipcMain.removeListener('picker:select', onSelect);
+                finish(null);
+            });
+        } catch (err) {
+            console.error('[screenshare] handler error:', err);
+            callback(null);
+        }
+    }, { useSystemPicker: true });
+}
+
+/**
+ * Opens the main HashMeet window (loads meet.hashmicro.com directly).
  */
 function createJitsiMeetWindow() {
     // Application menu.
@@ -319,7 +411,7 @@ function createJitsiMeetWindow() {
     initPopupsConfigurationMain(mainWindow, windowOpenHandler);
     setupPictureInPictureMain(mainWindow);
     setupPowerMonitorMain(mainWindow);
-    setupScreenSharingMain(mainWindow, config.default.appName, pkgJson.build.appId);
+    setupScreenShareHandler(mainWindow);
     if (ENABLE_REMOTE_CONTROL) {
         setupRemoteControlMain(mainWindow);
     }

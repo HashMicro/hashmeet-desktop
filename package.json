@@ -1,6 +1,6 @@
 {
   "name": "hashmeet-desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "HashMeet desktop app",
   "main": "./build/main.js",
   "productName": "HashMeet",
@@ -26,6 +26,7 @@
     "npmRebuild": false,
     "files": [
       "build",
+      "picker",
       "resources",
       "!app",
       "!brand",
