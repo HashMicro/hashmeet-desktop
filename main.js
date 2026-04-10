@@ -10,9 +10,11 @@ const {
 const {
     BrowserWindow,
     Menu,
+    Tray,
     app,
     desktopCapturer,
-    ipcMain
+    ipcMain,
+    shell
 } = require('electron');
 const contextMenu = require('electron-context-menu');
 const debug = require('electron-debug');
@@ -91,6 +93,17 @@ let mainWindow = null;
 let webrtcInternalsWindow = null;
 
 /**
+ * The system tray icon. Created once on app ready.
+ */
+let tray = null;
+
+/**
+ * Set to true when the user has chosen Quit (tray menu, app menu, or
+ * Cmd+Q). While false, closing the main window hides it to tray instead.
+ */
+let isQuitting = false;
+
+/**
  * Add protocol data
  */
 const appProtocolSurplus = `${config.default.appProtocolPrefix}://`;
@@ -99,73 +112,195 @@ let protocolDataForFrontApp = null;
 
 
 /**
- * Sets the application menu. It is hidden on all platforms except macOS because
- * otherwise copy and paste functionality is not available.
+ * Builds and installs the application menu. On macOS this shows as the
+ * global top-of-screen menu bar. On Windows the menu bar is not rendered
+ * (because we use titleBarStyle 'hidden'), but the accelerators still
+ * register so keyboard shortcuts like Cmd+R / F11 work.
  */
 function setApplicationMenu() {
-    if (process.platform === 'darwin') {
-        const template = [ {
+    const isMac = process.platform === 'darwin';
+    const homeURL = config.default.defaultServerURL;
+
+    const quitItem = {
+        label: isMac ? `Quit ${app.name}` : 'Quit HashMeet',
+        accelerator: isMac ? 'Cmd+Q' : 'Ctrl+Q',
+        click: () => {
+            isQuitting = true;
+            app.quit();
+        }
+    };
+
+    const template = [
+        ...(isMac ? [ {
             label: app.name,
             submenu: [
-                {
-                    role: 'services',
-                    submenu: []
-                },
+                { role: 'about' },
+                { type: 'separator' },
+                { role: 'services' },
                 { type: 'separator' },
                 { role: 'hide' },
-                { role: 'hideothers' },
+                { role: 'hideOthers' },
                 { role: 'unhide' },
                 { type: 'separator' },
-                { role: 'quit' }
+                quitItem
             ]
-        }, {
+        } ] : []),
+        {
+            label: 'File',
+            submenu: [
+                {
+                    label: 'Home',
+                    accelerator: 'CmdOrCtrl+Shift+H',
+                    click: () => { if (mainWindow) mainWindow.loadURL(homeURL); }
+                },
+                { type: 'separator' },
+                {
+                    label: 'Reload',
+                    accelerator: 'CmdOrCtrl+R',
+                    click: () => { if (mainWindow) mainWindow.reload(); }
+                },
+                {
+                    label: 'Force Reload',
+                    accelerator: 'CmdOrCtrl+Shift+R',
+                    click: () => { if (mainWindow) mainWindow.webContents.reloadIgnoringCache(); }
+                },
+                ...(isMac ? [] : [ { type: 'separator' }, quitItem ])
+            ]
+        },
+        {
             label: 'Edit',
-            submenu: [ {
-                label: 'Undo',
-                accelerator: 'CmdOrCtrl+Z',
-                selector: 'undo:'
-            },
-            {
-                label: 'Redo',
-                accelerator: 'Shift+CmdOrCtrl+Z',
-                selector: 'redo:'
-            },
-            {
-                type: 'separator'
-            },
-            {
-                label: 'Cut',
-                accelerator: 'CmdOrCtrl+X',
-                selector: 'cut:'
-            },
-            {
-                label: 'Copy',
-                accelerator: 'CmdOrCtrl+C',
-                selector: 'copy:'
-            },
-            {
-                label: 'Paste',
-                accelerator: 'CmdOrCtrl+V',
-                selector: 'paste:'
-            },
-            {
-                label: 'Select All',
-                accelerator: 'CmdOrCtrl+A',
-                selector: 'selectAll:'
-            } ]
-        }, {
-            label: '&Window',
-            role: 'window',
+            submenu: [
+                { role: 'undo' },
+                { role: 'redo' },
+                { type: 'separator' },
+                { role: 'cut' },
+                { role: 'copy' },
+                { role: 'paste' },
+                { role: 'selectAll' }
+            ]
+        },
+        {
+            label: 'View',
+            submenu: [
+                { role: 'resetZoom' },
+                { role: 'zoomIn' },
+                { role: 'zoomOut' },
+                { type: 'separator' },
+                { role: 'togglefullscreen' },
+                { type: 'separator' },
+                {
+                    label: 'Toggle Developer Tools',
+                    accelerator: isMac ? 'Alt+Cmd+I' : 'Ctrl+Shift+I',
+                    click: () => { if (mainWindow) mainWindow.webContents.toggleDevTools(); }
+                }
+            ]
+        },
+        {
+            label: 'Window',
             submenu: [
                 { role: 'minimize' },
-                { role: 'close' }
+                ...(isMac
+                    ? [ { type: 'separator' }, { role: 'front' } ]
+                    : [ {
+                        label: 'Hide to Tray',
+                        accelerator: 'Ctrl+W',
+                        click: () => { if (mainWindow) mainWindow.hide(); }
+                    } ])
             ]
-        } ];
+        },
+        {
+            label: 'Help',
+            submenu: [
+                {
+                    label: 'Report an Issue',
+                    click: () => shell.openExternal('https://github.com/HashMicro/hashmeet-desktop/issues')
+                },
+                {
+                    label: 'HashMicro Website',
+                    click: () => shell.openExternal('https://hashmicro.com')
+                }
+            ]
+        }
+    ];
 
-        Menu.setApplicationMenu(Menu.buildFromTemplate(template));
-    } else {
-        Menu.setApplicationMenu(null);
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+/**
+ * Create the system tray icon with context menu (Show / Quit).
+ * Clicking the tray icon toggles window visibility.
+ */
+function createTray() {
+    if (tray) return;
+
+    const iconPath = path.resolve(app.getAppPath(), 'resources', 'tray-icon.png');
+    try {
+        tray = new Tray(iconPath);
+    } catch (err) {
+        console.warn('[tray] Could not create system tray icon:', err.message);
+        return;
     }
+    tray.setToolTip('HashMeet');
+    tray.setContextMenu(Menu.buildFromTemplate([
+        {
+            label: 'Show HashMeet',
+            click: () => {
+                if (mainWindow) {
+                    if (mainWindow.isMinimized()) mainWindow.restore();
+                    mainWindow.show();
+                    mainWindow.focus();
+                }
+            }
+        },
+        { type: 'separator' },
+        {
+            label: 'Quit',
+            click: () => {
+                isQuitting = true;
+                app.quit();
+            }
+        }
+    ]));
+
+    tray.on('click', () => {
+        if (!mainWindow) return;
+        if (mainWindow.isVisible() && !mainWindow.isMinimized()) {
+            mainWindow.hide();
+        } else {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.show();
+            mainWindow.focus();
+        }
+    });
+}
+
+/**
+ * CSS injected on every page load to push webapp content below the
+ * custom title bar area. On Windows we also render a draggable dark
+ * strip behind the titleBarOverlay buttons so the window can be moved.
+ * macOS uses titleBarStyle 'hiddenInset' so drag is native — only
+ * padding is needed to keep content clear of the traffic lights.
+ */
+function getChromeCSS() {
+    if (process.platform === 'darwin') {
+        return 'body { padding-top: 28px !important; }';
+    }
+    if (process.platform === 'win32') {
+        return `
+            body { padding-top: 36px !important; }
+            html::before {
+                content: '';
+                position: fixed;
+                top: 0; left: 0; right: 140px;
+                height: 36px;
+                background: #1a1a1a;
+                z-index: 2147483647;
+                -webkit-app-region: drag;
+                pointer-events: none;
+            }
+        `;
+    }
+    return '';
 }
 
 /**
@@ -286,10 +421,8 @@ function createJitsiMeetWindow() {
     // React welcome screen at build/index.html is intentionally bypassed.
     const indexURL = config.default.defaultServerURL;
 
-    // Options used when creating the main Jitsi Meet window.
-    // Use a preload script in order to provide node specific functionality
-    // to a isolated BrowserWindow in accordance with electron security
-    // guideline.
+    // Options used when creating the main HashMeet window.
+    const isMac = process.platform === 'darwin';
     const options = {
         x: windowState.x,
         y: windowState.y,
@@ -299,6 +432,21 @@ function createJitsiMeetWindow() {
         minWidth: 800,
         minHeight: 600,
         show: false,
+        backgroundColor: '#1a1a1a',
+        title: 'HashMeet',
+        // Hide the native title bar but keep native window controls.
+        // macOS: traffic lights overlay the page at top-left.
+        // Windows: min/max/close buttons shown as a titleBarOverlay
+        //          in the top-right corner.
+        titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+        ...(isMac ? { trafficLightPosition: { x: 16, y: 10 } } : {}),
+        ...(isMac ? {} : {
+            titleBarOverlay: {
+                color: '#1a1a1a',
+                symbolColor: '#ffffff',
+                height: 36
+            }
+        }),
         webPreferences: {
             enableBlinkFeatures: 'WebAssemblyCSP',
             contextIsolation: false,
@@ -416,12 +564,37 @@ function createJitsiMeetWindow() {
         setupRemoteControlMain(mainWindow);
     }
 
+    // Hide to tray instead of quitting when the user clicks the X button.
+    // Only exception: user explicitly chose Quit (from app menu, tray, or Cmd+Q).
+    mainWindow.on('close', (ev) => {
+        if (!isQuitting) {
+            ev.preventDefault();
+            mainWindow.hide();
+        }
+    });
+
     mainWindow.on('closed', () => {
         mainWindow = null;
     });
+
     mainWindow.once('ready-to-show', () => {
         mainWindow.show();
     });
+
+    // Inject chrome CSS (padding + drag strip) on every page load so custom
+    // title bar works across navigations inside the Laravel webapp.
+    const injectChromeCSS = () => {
+        const css = getChromeCSS();
+        if (css) {
+            mainWindow.webContents.insertCSS(css).catch(() => { /* ignore */ });
+        }
+    };
+
+    mainWindow.webContents.on('did-finish-load', injectChromeCSS);
+    mainWindow.webContents.on('did-frame-finish-load', injectChromeCSS);
+
+    // Create the tray icon once the main window exists.
+    createTray();
 
     /**
      * When someone tries to enter something like jitsi-meet://test
@@ -488,7 +661,15 @@ if (!gotInstanceLock) {
 app.on('activate', () => {
     if (mainWindow === null) {
         createJitsiMeetWindow();
+    } else if (!mainWindow.isVisible()) {
+        mainWindow.show();
+        mainWindow.focus();
     }
+});
+
+// Ensure app.quit() propagates past the close-to-hide interceptor.
+app.on('before-quit', () => {
+    isQuitting = true;
 });
 
 app.on('certificate-error',

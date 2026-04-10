@@ -22,6 +22,10 @@ async function main() {
     fs.writeFileSync(path.join(RES, 'icon.png'), await sharp(master).resize(512, 512).png().toBuffer());
     fs.writeFileSync(path.join(ICONS, '512x512.png'), await sharp(master).resize(512, 512).png().toBuffer());
 
+    // Tray icons (system tray / macOS menu bar). @2x is for retina.
+    fs.writeFileSync(path.join(RES, 'tray-icon.png'), await sharp(master).resize(16, 16).png().toBuffer());
+    fs.writeFileSync(path.join(RES, 'tray-icon@2x.png'), await sharp(master).resize(32, 32).png().toBuffer());
+
     const icns = png2icons.createICNS(master, png2icons.BILINEAR, 0);
     if (!icns) throw new Error('createICNS returned null');
     fs.writeFileSync(path.join(RES, 'icon.icns'), icns);
@@ -31,7 +35,7 @@ async function main() {
     fs.writeFileSync(path.join(RES, 'icon.ico'), ico);
 
     console.log('icons regenerated:');
-    for (const f of ['icon.png', 'icon.icns', 'icon.ico', 'icons/512x512.png']) {
+    for (const f of ['icon.png', 'icon.icns', 'icon.ico', 'tray-icon.png', 'tray-icon@2x.png', 'icons/512x512.png']) {
         const p = path.join(RES, f);
         console.log(`  ${f}  ${fs.statSync(p).size} bytes`);
     }
