@@ -297,10 +297,10 @@ function getChromeCSS() {
             html::before {
                 content: '';
                 position: fixed;
-                top: 0; left: 0; right: 140px;
+                top: 0; left: 0; right: 0;
                 height: 36px;
                 background: #1a1a1a;
-                z-index: 2147483647;
+                z-index: 2147483646;
                 -webkit-app-region: drag;
                 pointer-events: none;
             }
