@@ -53,6 +53,12 @@ if (!app.commandLine.hasSwitch('enable-features')) {
     app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
 }
 
+// Prevent Chromium from throttling audio/video when window loses focus.
+// Critical for a video-calling app — without these, background calls get
+// choppy audio, dropped frames, and delayed timer callbacks.
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+
 autoUpdater.logger = require('electron-log');
 autoUpdater.logger.transports.file.level = 'info';
 

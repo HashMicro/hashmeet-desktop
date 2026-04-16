@@ -1,6 +1,6 @@
 {
   "name": "hashmeet-desktop",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "HashMeet desktop app",
   "main": "./build/main.js",
   "productName": "HashMeet",
