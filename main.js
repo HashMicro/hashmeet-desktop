@@ -14,6 +14,7 @@ const {
     app,
     desktopCapturer,
     ipcMain,
+    screen,
     shell
 } = require('electron');
 const contextMenu = require('electron-context-menu');
@@ -108,6 +109,12 @@ let tray = null;
  * Cmd+Q). While false, closing the main window hides it to tray instead.
  */
 let isQuitting = false;
+
+/**
+ * The always-on-top floating toolbar window shown while the user is
+ * screen sharing. Created on demand via IPC from the main renderer.
+ */
+let toolbarWindow = null;
 
 /**
  * Add protocol data
@@ -402,6 +409,90 @@ function setupScreenShareHandler(window) {
 }
 
 /**
+ * Open (or refresh) the floating always-on-top screen-share toolbar.
+ * Loaded from `toolbar/toolbar.html`; state is fed via IPC.
+ *
+ * Positioned bottom-center of the primary display. Focus is never
+ * taken from the shared window (focusable:false + showInactive).
+ */
+function createToolbarWindow(initialState) {
+    if (toolbarWindow && !toolbarWindow.isDestroyed()) {
+        toolbarWindow.webContents.send('toolbar:init', initialState || {});
+        if (!toolbarWindow.isVisible()) {
+            toolbarWindow.showInactive();
+        }
+
+        return;
+    }
+
+    const TOOLBAR_WIDTH = 420;
+    const TOOLBAR_HEIGHT = 84;
+    const MARGIN_BOTTOM = 40;
+
+    const { workArea } = screen.getPrimaryDisplay();
+    const x = Math.round(workArea.x + ((workArea.width - TOOLBAR_WIDTH) / 2));
+    const y = Math.round((workArea.y + workArea.height) - TOOLBAR_HEIGHT - MARGIN_BOTTOM);
+
+    toolbarWindow = new BrowserWindow({
+        width: TOOLBAR_WIDTH,
+        height: TOOLBAR_HEIGHT,
+        x,
+        y,
+        frame: false,
+        transparent: true,
+        backgroundColor: '#00000000',
+        resizable: false,
+        movable: true,
+        minimizable: false,
+        maximizable: false,
+        fullscreenable: false,
+        skipTaskbar: true,
+        alwaysOnTop: true,
+        focusable: false,
+        acceptFirstMouse: true,
+        hasShadow: false,
+        show: false,
+        title: 'HashMeet Screen Share',
+        webPreferences: {
+            contextIsolation: false,
+            nodeIntegration: true,
+            sandbox: false,
+            backgroundThrottling: false
+        }
+    });
+
+    toolbarWindow.setAlwaysOnTop(true, 'screen-saver');
+    toolbarWindow.setMenuBarVisibility(false);
+    if (process.platform === 'darwin') {
+        toolbarWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    }
+
+    toolbarWindow.loadFile(path.resolve(app.getAppPath(), 'toolbar', 'toolbar.html'));
+
+    toolbarWindow.webContents.once('did-finish-load', () => {
+        if (!toolbarWindow || toolbarWindow.isDestroyed()) {
+            return;
+        }
+        toolbarWindow.webContents.send('toolbar:init', initialState || {});
+        toolbarWindow.showInactive();
+    });
+
+    toolbarWindow.on('closed', () => {
+        toolbarWindow = null;
+    });
+}
+
+/**
+ * Destroy the floating toolbar window if it's open.
+ */
+function closeToolbarWindow() {
+    if (toolbarWindow && !toolbarWindow.isDestroyed()) {
+        toolbarWindow.close();
+    }
+    toolbarWindow = null;
+}
+
+/**
  * Opens the main HashMeet window (loads meet.hashmicro.com directly).
  */
 function createJitsiMeetWindow() {
@@ -581,6 +672,16 @@ function createJitsiMeetWindow() {
 
     mainWindow.on('closed', () => {
         mainWindow = null;
+        closeToolbarWindow();
+    });
+
+    // Close the floating toolbar if the main renderer navigates away
+    // (reload, URL change). Defensive: the webapp normally sends
+    // 'toolbar:close' via screenSharingStatusChanged first.
+    mainWindow.webContents.on('did-start-navigation', (_ev, _url, isInPlace, isMainFrame) => {
+        if (isMainFrame && !isInPlace) {
+            closeToolbarWindow();
+        }
     });
 
     mainWindow.once('ready-to-show', () => {
@@ -676,6 +777,7 @@ app.on('activate', () => {
 // Ensure app.quit() propagates past the close-to-hide interceptor.
 app.on('before-quit', () => {
     isQuitting = true;
+    closeToolbarWindow();
 });
 
 app.on('certificate-error',
@@ -772,5 +874,39 @@ ipcMain.on('restore-meeting-window', () => {
             mainWindow.restore();
         }
         mainWindow.focus();
+    }
+});
+
+/**
+ * Main renderer requests the floating toolbar (screen share started).
+ */
+ipcMain.on('toolbar:open', (_ev, initialState) => {
+    createToolbarWindow(initialState || {});
+});
+
+/**
+ * Main renderer requests the floating toolbar be closed (screen share stopped).
+ */
+ipcMain.on('toolbar:close', () => {
+    closeToolbarWindow();
+});
+
+/**
+ * Main renderer pushes a state patch (pause/mute/speaker/count changed).
+ * Silently drops when no toolbar window exists.
+ */
+ipcMain.on('toolbar:state', (_ev, patch) => {
+    if (toolbarWindow && !toolbarWindow.isDestroyed()) {
+        toolbarWindow.webContents.send('toolbar:state', patch || {});
+    }
+});
+
+/**
+ * Toolbar renderer button click — forward to the main renderer so its
+ * existing handlers (handlePause / handleMute / handleStop) run.
+ */
+ipcMain.on('toolbar:action', (_ev, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('toolbar:action', payload || {});
     }
 });

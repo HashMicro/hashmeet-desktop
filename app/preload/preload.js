@@ -7,7 +7,18 @@ const {
 } = require('@jitsi/electron-sdk');
 const { ipcRenderer } = require('electron');
 
-const whitelistedIpcChannels = [ 'protocol-data-msg', 'renderer-ready', 'restore-meeting-window' ];
+const whitelistedSendChannels = [
+    'renderer-ready',
+    'restore-meeting-window',
+    'toolbar:open',
+    'toolbar:close',
+    'toolbar:state'
+];
+
+const whitelistedReceiveChannels = [
+    'protocol-data-msg',
+    'toolbar:action'
+];
 
 ipcRenderer.setMaxListeners(0);
 
@@ -49,7 +60,7 @@ window.jitsiNodeAPI = {
     setupRenderer,
     ipc: {
         addListener: (channel, listener) => {
-            if (!whitelistedIpcChannels.includes(channel)) {
+            if (!whitelistedReceiveChannels.includes(channel)) {
                 return;
             }
 
@@ -65,12 +76,28 @@ window.jitsiNodeAPI = {
 
             return remove;
         },
-        send: channel => {
-            if (!whitelistedIpcChannels.includes(channel)) {
+        send: (channel, data) => {
+            if (!whitelistedSendChannels.includes(channel)) {
                 return;
             }
 
-            ipcRenderer.send(channel);
+            if (data === undefined) {
+                ipcRenderer.send(channel);
+            } else {
+                ipcRenderer.send(channel, data);
+            }
+        }
+    },
+    toolbar: {
+        open: snapshot => ipcRenderer.send('toolbar:open', snapshot || {}),
+        close: () => ipcRenderer.send('toolbar:close'),
+        sendState: patch => ipcRenderer.send('toolbar:state', patch || {}),
+        onAction: cb => {
+            const handler = (_event, payload) => cb(payload);
+
+            ipcRenderer.addListener('toolbar:action', handler);
+
+            return () => ipcRenderer.removeListener('toolbar:action', handler);
         }
     }
 };
