@@ -12,6 +12,7 @@ const {
     Menu,
     Tray,
     app,
+    clipboard,
     desktopCapturer,
     ipcMain,
     screen,
@@ -22,6 +23,7 @@ const debug = require('electron-debug');
 const isDev = require('electron-is-dev');
 const { autoUpdater } = require('electron-updater');
 const windowStateKeeper = require('electron-window-state');
+const fs = require('fs');
 const path = require('path');
 const process = require('process');
 const URL = require('url');
@@ -30,11 +32,109 @@ const config = require('./app/features/config');
 const { openExternalLink } = require('./app/features/utils/openExternalLink');
 const pkgJson = require('./package.json');
 
-const showDevTools = Boolean(process.env.SHOW_DEV_TOOLS) || (process.argv.indexOf('--show-dev-tools') > -1);
+const showDevTools = Boolean(process.env.SHOW_DEV_TOOLS) || process.argv.includes('--show-dev-tools');
+const enableDesktopDiagnostics = isDev
+    || showDevTools
+    || process.env.HASHMEET_DESKTOP_DIAGNOSTICS === 'true'
+    || process.argv.includes('--diagnostics');
 
 // For enabling remote control, please change the ENABLE_REMOTE_CONTROL flag in
 // app/features/conference/components/Conference.js to true as well
 const ENABLE_REMOTE_CONTROL = false;
+
+const HASHMEET_SERVER_URL_ENV = 'HASHMEET_DESKTOP_SERVER_URL';
+const JITSI_SCREEN_SHARE_GET_SOURCES = 'jitsi-screen-sharing-get-sources';
+const defaultServerURL = config.default.defaultServerURL;
+const allowServerURLOverride = isDev
+    || process.env.HASHMEET_DESKTOP_ALLOW_SERVER_OVERRIDE === 'true'
+    || process.argv.includes('--allow-server-override');
+
+/**
+ * Resolves the HashMeet web app URL used by the desktop shell.
+ *
+ * @returns {string}
+ */
+function resolveServerURL() {
+    const envURL = process.env[HASHMEET_SERVER_URL_ENV];
+
+    if (envURL && !allowServerURLOverride) {
+        console.warn(
+            `[config] Ignoring ${HASHMEET_SERVER_URL_ENV} in packaged mode. `
+            + 'Use development mode or HASHMEET_DESKTOP_ALLOW_SERVER_OVERRIDE=true for test builds.'
+        );
+    }
+
+    const configuredURL = envURL && allowServerURLOverride ? envURL : defaultServerURL;
+
+    try {
+        const url = new URL.URL(configuredURL);
+
+        if (![ 'http:', 'https:' ].includes(url.protocol)) {
+            throw new Error(`Unsupported protocol: ${url.protocol}`);
+        }
+
+        url.hash = '';
+        url.search = '';
+
+        return url.toString().replace(/\/$/, '');
+    } catch (err) {
+        console.warn(
+            `[config] Invalid ${HASHMEET_SERVER_URL_ENV} "${configuredURL}", `
+            + `falling back to ${defaultServerURL}: ${err.message}`
+        );
+
+        return defaultServerURL;
+    }
+}
+
+const hashMeetServerURL = resolveServerURL();
+
+function getAppBasePathCandidates() {
+    const appPath = app.getAppPath();
+    const candidates = [
+        appPath,
+        path.resolve(appPath, '..')
+    ];
+
+    if (typeof __dirname === 'string' && path.isAbsolute(__dirname)) {
+        candidates.push(__dirname, path.resolve(__dirname, '..'));
+    }
+
+    if (isDev) {
+        candidates.push(process.cwd());
+    }
+
+    return Array.from(new Set(candidates.map(candidate => path.resolve(candidate))));
+}
+
+function resolveAppAssetPath(...segments) {
+    const candidates = getAppBasePathCandidates().map(candidate => path.resolve(candidate, ...segments));
+    const found = candidates.find(candidate => fs.existsSync(candidate));
+
+    return found || candidates[0];
+}
+
+function isPathInside(parentPath, childPath) {
+    const relativePath = path.relative(parentPath, childPath);
+
+    return relativePath === '' || (relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath));
+}
+
+function getAllowedFileRoots() {
+    return getAppBasePathCandidates().filter(candidate => fs.existsSync(candidate));
+}
+
+/**
+ * Builds an absolute HashMeet web app URL from a relative path.
+ *
+ * @param {string} relativePath - Path or room name to append to the server URL.
+ * @returns {string}
+ */
+function buildHashMeetURL(relativePath = '') {
+    const cleanPath = String(relativePath).replace(/^\/+/, '');
+
+    return cleanPath ? `${hashMeetServerURL}/${cleanPath}` : hashMeetServerURL;
+}
 
 // Fix screen-sharing thumbnails being missing sometimes.
 // https://github.com/electron/electron/issues/44504
@@ -71,16 +171,18 @@ contextMenu({
     showCopyImageAddress: false,
     showSaveImage: false,
     showSaveImageAs: false,
-    showInspectElement: true,
+    showInspectElement: enableDesktopDiagnostics,
     showServices: false
 });
 
-// Enable DevTools also on release builds to help troubleshoot issues. Don't
-// show them automatically though.
-debug({
-    isEnabled: true,
-    showDevTools
-});
+// Keep DevTools unavailable in normal packaged builds. They can still be
+// enabled explicitly for diagnostics with SHOW_DEV_TOOLS=true or --diagnostics.
+if (enableDesktopDiagnostics) {
+    debug({
+        isEnabled: true,
+        showDevTools
+    });
+}
 
 /**
  * When in development mode:
@@ -115,6 +217,17 @@ let isQuitting = false;
  * screen sharing. Created on demand via IPC from the main renderer.
  */
 let toolbarWindow = null;
+let jitsiScreenShareSourceHandlerRegistered = false;
+
+const MAX_DIAGNOSTIC_EVENTS = 80;
+const diagnosticsEvents = [];
+const permissionState = {
+    media: { status: 'unknown' },
+    displayCapture: { status: 'unknown' },
+    notifications: { status: 'unknown' },
+    openExternal: { status: 'blocked' }
+};
+let lastScreenShareSource = null;
 
 /**
  * Add protocol data
@@ -122,6 +235,305 @@ let toolbarWindow = null;
 const appProtocolSurplus = `${config.default.appProtocolPrefix}://`;
 let rendererReady = false;
 let protocolDataForFrontApp = null;
+
+function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function redactLocalPath(value) {
+    let text = String(value);
+    const localRoots = [
+        process.env.HOME,
+        process.env.USERPROFILE
+    ].filter(root => root && root.length > 3);
+
+    localRoots.forEach(root => {
+        text = text.replace(new RegExp(escapeRegExp(root), 'g'), '~');
+    });
+
+    return text;
+}
+
+function redactDiagnosticString(value) {
+    let text = redactLocalPath(value)
+        .replace(/((?:authorization|cookie|password|secret|token)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]');
+
+    try {
+        const url = new URL.URL(text);
+
+        url.pathname = url.pathname.replace(/(\/meeting\/)[^/?#]+/i, '$1[redacted]');
+        url.search = '';
+        url.hash = '';
+
+        return redactLocalPath(url.toString());
+    } catch (_) {
+        return text.length > 500 ? `${text.substring(0, 500)}...` : text;
+    }
+}
+
+function sanitizeDiagnosticValue(value, depth = 0) {
+    if (value === null || value === undefined || typeof value === 'number' || typeof value === 'boolean') {
+        return value;
+    }
+
+    if (typeof value === 'string') {
+        return redactDiagnosticString(value);
+    }
+
+    if (depth > 3) {
+        return '[Object]';
+    }
+
+    if (Array.isArray(value)) {
+        return value.slice(0, 20).map(item => sanitizeDiagnosticValue(item, depth + 1));
+    }
+
+    if (typeof value === 'object') {
+        return Object.entries(value).slice(0, 30).reduce((acc, [ key, item ]) => {
+            if (/authorization|cookie|credential|csrf|jwt|password|secret|session|token|xsrf/i.test(key)) {
+                acc[key] = '[redacted]';
+            } else {
+                acc[key] = sanitizeDiagnosticValue(item, depth + 1);
+            }
+
+            return acc;
+        }, {});
+    }
+
+    return String(value);
+}
+
+function recordDiagnosticEvent(type, payload = {}) {
+    const event = {
+        at: new Date().toISOString(),
+        type: String(type || 'event'),
+        payload: sanitizeDiagnosticValue(payload)
+    };
+
+    diagnosticsEvents.push(event);
+
+    while (diagnosticsEvents.length > MAX_DIAGNOSTIC_EVENTS) {
+        diagnosticsEvents.shift();
+    }
+
+    return event;
+}
+
+function getCurrentURLSummary() {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+        return null;
+    }
+
+    try {
+        const url = new URL.URL(mainWindow.webContents.getURL());
+
+        url.search = '';
+        url.hash = '';
+
+        return url.toString();
+    } catch (_) {
+        return null;
+    }
+}
+
+function getPermissionStatus() {
+    return sanitizeDiagnosticValue(permissionState);
+}
+
+function getDesktopInfo() {
+    return {
+        appName: app.name,
+        productName: pkgJson.productName || pkgJson.name,
+        appVersion: pkgJson.version,
+        electronVersion: process.versions.electron,
+        chromeVersion: process.versions.chrome,
+        nodeVersion: process.versions.node,
+        platform: process.platform,
+        arch: process.arch,
+        isDev,
+        serverURL: hashMeetServerURL,
+        currentURL: getCurrentURLSummary(),
+        lastScreenShareSource,
+        permissions: getPermissionStatus()
+    };
+}
+
+function getDiagnosticBundle() {
+    return {
+        generatedAt: new Date().toISOString(),
+        desktop: getDesktopInfo(),
+        events: diagnosticsEvents.slice()
+    };
+}
+
+function copyDiagnosticsToClipboard() {
+    const bundle = getDiagnosticBundle();
+
+    clipboard.writeText(JSON.stringify(bundle, null, 2));
+    recordDiagnosticEvent('diagnostics-copied', { eventCount: diagnosticsEvents.length });
+
+    return {
+        ok: true,
+        eventCount: diagnosticsEvents.length
+    };
+}
+
+function sendToMainWindow(channel, payload) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(channel, payload);
+    }
+}
+
+function updatePermissionState(permission, status, details = {}) {
+    const keyMap = {
+        'display-capture': 'displayCapture',
+        media: 'media',
+        notifications: 'notifications',
+        openExternal: 'openExternal'
+    };
+    const key = keyMap[permission] || permission;
+    const snapshot = {
+        status,
+        permission,
+        updatedAt: new Date().toISOString()
+    };
+
+    if (details && typeof details === 'object') {
+        snapshot.details = sanitizeDiagnosticValue(details);
+    }
+
+    permissionState[key] = sanitizeDiagnosticValue(snapshot);
+    recordDiagnosticEvent('permission-request', {
+        permission,
+        status,
+        details: snapshot
+    });
+
+    return permissionState[key];
+}
+
+function buildSourceInfo(source) {
+    if (!source) {
+        return null;
+    }
+
+    return {
+        id: source.id,
+        name: source.name,
+        type: source.id.startsWith('screen:') ? 'screen' : 'window'
+    };
+}
+
+function isWaylandSession() {
+    return process.platform === 'linux'
+        && (
+            String(process.env.XDG_SESSION_TYPE || '').toLowerCase() === 'wayland'
+            || Boolean(process.env.WAYLAND_DISPLAY)
+        );
+}
+
+function displayMediaRequestHandlerOptions() {
+    return {
+        // Electron only supports the explicit system picker option on macOS.
+        // Linux Wayland reaches the PipeWire portal through desktopCapturer.
+        useSystemPicker: process.platform === 'darwin'
+    };
+}
+
+function shouldUseOpaqueToolbarWindow() {
+    return isWaylandSession();
+}
+
+function attachToolbarWindowDiagnostics(targetWindow) {
+    const record = (type, payload = {}) => recordDiagnosticEvent(`toolbar-window-${type}`, {
+        ...payload,
+        wayland: isWaylandSession()
+    });
+
+    targetWindow.webContents.on('did-fail-load', (
+            _event,
+            errorCode,
+            errorDescription,
+            validatedURL,
+            isMainFrame
+    ) => {
+        record('did-fail-load', {
+            errorCode,
+            errorDescription,
+            validatedURL,
+            isMainFrame
+        });
+    });
+
+    targetWindow.webContents.on('render-process-gone', (_event, details) => {
+        record('render-process-gone', details || {});
+    });
+
+    targetWindow.webContents.on('unresponsive', () => {
+        record('unresponsive');
+    });
+
+    targetWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+        if (level < 2) {
+            return;
+        }
+
+        record('console-message', {
+            level,
+            message,
+            line,
+            sourceId
+        });
+    });
+}
+
+function grantScreenShareSource(source, callback, origin = 'custom-picker') {
+    if (!source) {
+        recordDiagnosticEvent('screen-share-source-cancelled', { origin });
+        callback(null);
+
+        return;
+    }
+
+    lastScreenShareSource = buildSourceInfo(source);
+    updatePermissionState('display-capture', 'allowed', {
+        origin,
+        sourceName: lastScreenShareSource.name,
+        sourceType: lastScreenShareSource.type,
+        wayland: isWaylandSession()
+    });
+    recordDiagnosticEvent('screen-share-source-selected', {
+        ...lastScreenShareSource,
+        origin,
+        wayland: isWaylandSession()
+    });
+    sendToMainWindow('desktop:screen-source-selected', lastScreenShareSource);
+    callback({ video: source });
+}
+
+function setupJitsiScreenShareSourceHandler() {
+    if (jitsiScreenShareSourceHandlerRegistered) {
+        return;
+    }
+
+    ipcMain.handle(JITSI_SCREEN_SHARE_GET_SOURCES, (_event, options = {}) => {
+        const sourceOptions = {
+            ...options,
+            types: options.types || [ 'screen', 'window' ],
+            thumbnailSize: options.thumbnailSize || { width: 320, height: 200 },
+            fetchWindowIcons: options.fetchWindowIcons === true
+        };
+
+        recordDiagnosticEvent('screen-share-source-list-requested', {
+            types: sourceOptions.types,
+            thumbnailSize: sourceOptions.thumbnailSize
+        });
+
+        return desktopCapturer.getSources(sourceOptions);
+    });
+
+    jitsiScreenShareSourceHandlerRegistered = true;
+}
 
 
 /**
@@ -132,7 +544,7 @@ let protocolDataForFrontApp = null;
  */
 function setApplicationMenu() {
     const isMac = process.platform === 'darwin';
-    const homeURL = config.default.defaultServerURL;
+    const homeURL = hashMeetServerURL;
 
     const quitItem = {
         label: isMac ? `Quit ${app.name}` : 'Quit HashMeet',
@@ -198,14 +610,15 @@ function setApplicationMenu() {
                 { role: 'resetZoom' },
                 { role: 'zoomIn' },
                 { role: 'zoomOut' },
-                { type: 'separator' },
                 { role: 'togglefullscreen' },
-                { type: 'separator' },
-                {
-                    label: 'Toggle Developer Tools',
-                    accelerator: isMac ? 'Alt+Cmd+I' : 'Ctrl+Shift+I',
-                    click: () => { if (mainWindow) mainWindow.webContents.toggleDevTools(); }
-                }
+                ...(enableDesktopDiagnostics ? [
+                    { type: 'separator' },
+                    {
+                        label: 'Toggle Developer Tools',
+                        accelerator: isMac ? 'Alt+Cmd+I' : 'Ctrl+Shift+I',
+                        click: () => { if (mainWindow) mainWindow.webContents.toggleDevTools(); }
+                    }
+                ] : [])
             ]
         },
         {
@@ -224,6 +637,16 @@ function setApplicationMenu() {
         {
             label: 'Help',
             submenu: [
+                {
+                    label: 'Copy Diagnostics',
+                    accelerator: 'CmdOrCtrl+Shift+D',
+                    click: () => copyDiagnosticsToClipboard()
+                },
+                ...(enableDesktopDiagnostics ? [ {
+                    label: 'Open WebRTC Internals',
+                    click: () => createWebRTCInternalsWindow()
+                } ] : []),
+                { type: 'separator' },
                 {
                     label: 'Report an Issue',
                     click: () => shell.openExternal('https://github.com/HashMicro/hashmeet-desktop/issues')
@@ -246,7 +669,7 @@ function setApplicationMenu() {
 function createTray() {
     if (tray) return;
 
-    const iconPath = path.resolve(app.getAppPath(), 'resources', 'tray-icon.png');
+    const iconPath = resolveAppAssetPath('resources', 'tray-icon.png');
     try {
         tray = new Tray(iconPath);
     } catch (err) {
@@ -289,31 +712,48 @@ function createTray() {
 
 /**
  * CSS injected on every page load to push webapp content below the
- * custom title bar area. On Windows we also render a draggable dark
- * strip behind the titleBarOverlay buttons so the window can be moved.
+ * custom title bar area. On non-macOS platforms we also render a
+ * draggable dark strip behind the titleBarOverlay buttons so the window can be moved.
  * macOS uses titleBarStyle 'hiddenInset' so drag is native — only
  * padding is needed to keep content clear of the traffic lights.
  */
 function getChromeCSS() {
     if (process.platform === 'darwin') {
-        return 'body { padding-top: 28px !important; }';
-    }
-    if (process.platform === 'win32') {
         return `
-            body { padding-top: 36px !important; }
-            html::before {
-                content: '';
-                position: fixed;
-                top: 0; left: 0; right: 0;
-                height: 36px;
-                background: #1a1a1a;
-                z-index: 2147483646;
+            :root { --hashmeet-desktop-chrome-height: 28px; }
+            body {
+                padding-top: var(--hashmeet-desktop-chrome-height) !important;
                 -webkit-app-region: drag;
-                pointer-events: none;
+            }
+            body > * { -webkit-app-region: no-drag; }
+            #jitsi-container.header-hidden {
+                top: var(--hashmeet-desktop-chrome-height) !important;
+                height: calc(100vh - var(--hashmeet-desktop-chrome-height)) !important;
+                height: calc(100dvh - var(--hashmeet-desktop-chrome-height)) !important;
             }
         `;
     }
-    return '';
+
+    return `
+        :root { --hashmeet-desktop-chrome-height: 36px; }
+        body {
+            padding-top: var(--hashmeet-desktop-chrome-height) !important;
+            -webkit-app-region: drag;
+        }
+        body > * { -webkit-app-region: no-drag; }
+        body > header.navbar,
+        body header.navbar,
+        .navbar.fixed-top,
+        .navbar.sticky-top {
+            box-sizing: border-box !important;
+            padding-right: 144px !important;
+        }
+        #jitsi-container.header-hidden {
+            top: var(--hashmeet-desktop-chrome-height) !important;
+            height: calc(100vh - var(--hashmeet-desktop-chrome-height)) !important;
+            height: calc(100dvh - var(--hashmeet-desktop-chrome-height)) !important;
+        }
+    `;
 }
 
 /**
@@ -328,24 +768,43 @@ function getChromeCSS() {
 function setupScreenShareHandler(window) {
     window.webContents.session.setDisplayMediaRequestHandler(async (request, callback) => {
         try {
-            const sources = await desktopCapturer.getSources({
+            const sourceOptions = {
                 types: [ 'screen', 'window' ],
                 thumbnailSize: { width: 320, height: 200 },
                 fetchWindowIcons: false
-            });
+            };
+            const sources = await desktopCapturer.getSources(sourceOptions);
 
             if (!sources.length) {
+                recordDiagnosticEvent('screen-share-no-sources', {
+                    wayland: isWaylandSession(),
+                    request: {
+                        audioRequested: request.audioRequested,
+                        videoRequested: request.videoRequested,
+                        securityOrigin: request.securityOrigin,
+                        userGesture: request.userGesture
+                    }
+                });
                 callback(null);
+                return;
+            }
+
+            if (isWaylandSession()) {
+                // On Wayland the PipeWire portal already selected the real
+                // source before desktopCapturer resolves. Opening our custom
+                // picker after that produces an extra blank black window.
+                grantScreenShareSource(sources[0], callback, 'wayland-pipewire');
+
                 return;
             }
 
             const picker = new BrowserWindow({
                 parent: window,
                 modal: true,
-                width: 760,
-                height: 560,
-                minWidth: 480,
-                minHeight: 360,
+                width: 900,
+                height: 640,
+                minWidth: 640,
+                minHeight: 420,
                 resizable: true,
                 minimizable: false,
                 maximizable: false,
@@ -362,7 +821,7 @@ function setupScreenShareHandler(window) {
             });
 
             picker.setMenuBarVisibility(false);
-            picker.loadFile(path.resolve(app.getAppPath(), 'picker', 'picker.html'));
+            picker.loadFile(resolveAppAssetPath('picker', 'picker.html'));
 
             const sourcesById = new Map();
             sources.forEach(s => sourcesById.set(s.id, s));
@@ -384,11 +843,9 @@ function setupScreenShareHandler(window) {
                 if (settled) return;
                 settled = true;
                 const source = sourceId ? sourcesById.get(sourceId) : null;
-                if (source) {
-                    callback({ video: source });
-                } else {
-                    callback(null);
-                }
+
+                grantScreenShareSource(source, callback, 'custom-picker');
+
                 if (!picker.isDestroyed()) {
                     picker.close();
                 }
@@ -403,17 +860,21 @@ function setupScreenShareHandler(window) {
             });
         } catch (err) {
             console.error('[screenshare] handler error:', err);
+            recordDiagnosticEvent('screen-share-handler-error', {
+                message: err.message,
+                stack: err.stack
+            });
             callback(null);
         }
-    }, { useSystemPicker: true });
+    }, displayMediaRequestHandlerOptions());
 }
 
 /**
  * Open (or refresh) the floating always-on-top screen-share toolbar.
  * Loaded from `toolbar/toolbar.html`; state is fed via IPC.
  *
- * Positioned bottom-center of the primary display. Focus is never
- * taken from the shared window (focusable:false + showInactive).
+ * Positioned bottom-center of the primary display. On Wayland we avoid
+ * transparent/non-focusable flags because some compositors render them blank.
  */
 function createToolbarWindow(initialState) {
     if (toolbarWindow && !toolbarWindow.isDestroyed()) {
@@ -425,11 +886,12 @@ function createToolbarWindow(initialState) {
         return;
     }
 
-    const TOOLBAR_WIDTH = 420;
-    const TOOLBAR_HEIGHT = 84;
-    const MARGIN_BOTTOM = 40;
-
     const { workArea } = screen.getPrimaryDisplay();
+    const TOOLBAR_WIDTH = Math.min(680, Math.max(560, workArea.width - 48));
+    const TOOLBAR_HEIGHT = 104;
+    const MARGIN_BOTTOM = 40;
+    const opaqueToolbarWindow = shouldUseOpaqueToolbarWindow();
+
     const x = Math.round(workArea.x + ((workArea.width - TOOLBAR_WIDTH) / 2));
     const y = Math.round((workArea.y + workArea.height) - TOOLBAR_HEIGHT - MARGIN_BOTTOM);
 
@@ -439,8 +901,8 @@ function createToolbarWindow(initialState) {
         x,
         y,
         frame: false,
-        transparent: true,
-        backgroundColor: '#00000000',
+        transparent: !opaqueToolbarWindow,
+        backgroundColor: opaqueToolbarWindow ? '#18181b' : '#00000000',
         resizable: false,
         movable: true,
         minimizable: false,
@@ -448,9 +910,9 @@ function createToolbarWindow(initialState) {
         fullscreenable: false,
         skipTaskbar: true,
         alwaysOnTop: true,
-        focusable: false,
+        focusable: opaqueToolbarWindow,
         acceptFirstMouse: true,
-        hasShadow: false,
+        hasShadow: !opaqueToolbarWindow,
         show: false,
         title: 'HashMeet Screen Share',
         webPreferences: {
@@ -461,18 +923,35 @@ function createToolbarWindow(initialState) {
         }
     });
 
+    attachToolbarWindowDiagnostics(toolbarWindow);
+    recordDiagnosticEvent('toolbar-window-created', {
+        opaque: opaqueToolbarWindow,
+        focusable: opaqueToolbarWindow,
+        wayland: isWaylandSession(),
+        bounds: { x, y, width: TOOLBAR_WIDTH, height: TOOLBAR_HEIGHT }
+    });
     toolbarWindow.setAlwaysOnTop(true, 'screen-saver');
     toolbarWindow.setMenuBarVisibility(false);
     if (process.platform === 'darwin') {
         toolbarWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     }
 
-    toolbarWindow.loadFile(path.resolve(app.getAppPath(), 'toolbar', 'toolbar.html'));
+    const toolbarPath = resolveAppAssetPath('toolbar', 'toolbar.html');
+
+    recordDiagnosticEvent('toolbar-window-load-file', {
+        path: toolbarPath,
+        exists: fs.existsSync(toolbarPath)
+    });
+    toolbarWindow.loadFile(toolbarPath);
 
     toolbarWindow.webContents.once('did-finish-load', () => {
         if (!toolbarWindow || toolbarWindow.isDestroyed()) {
             return;
         }
+        recordDiagnosticEvent('toolbar-window-loaded', {
+            wayland: isWaylandSession(),
+            visible: toolbarWindow.isVisible()
+        });
         toolbarWindow.webContents.send('toolbar:init', initialState || {});
         toolbarWindow.showInactive();
     });
@@ -511,12 +990,9 @@ function createJitsiMeetWindow() {
         fullScreen: false
     });
 
-    // Path to root directory.
-    const basePath = isDev ? __dirname : app.getAppPath();
-
     // HashMeet desktop loads the live Laravel webapp directly. The upstream
     // React welcome screen at build/index.html is intentionally bypassed.
-    const indexURL = config.default.defaultServerURL;
+    const indexURL = hashMeetServerURL;
 
     // Options used when creating the main HashMeet window.
     const isMac = process.platform === 'darwin';
@@ -525,7 +1001,7 @@ function createJitsiMeetWindow() {
         y: windowState.y,
         width: windowState.width,
         height: windowState.height,
-        icon: path.resolve(basePath, './resources/icon.png'),
+        icon: resolveAppAssetPath('resources', 'icon.png'),
         minWidth: 800,
         minHeight: 600,
         show: false,
@@ -548,7 +1024,7 @@ function createJitsiMeetWindow() {
             enableBlinkFeatures: 'WebAssemblyCSP',
             contextIsolation: false,
             nodeIntegration: false,
-            preload: path.resolve(basePath, './build/preload.js'),
+            preload: resolveAppAssetPath('build', 'preload.js'),
             sandbox: false
         }
     };
@@ -571,6 +1047,7 @@ function createJitsiMeetWindow() {
 
     mainWindow = new BrowserWindow(options);
     windowState.manage(mainWindow);
+    console.log(`[config] Loading HashMeet web app from ${indexURL}`);
     mainWindow.loadURL(indexURL);
 
     if (isDev) {
@@ -582,11 +1059,13 @@ function createJitsiMeetWindow() {
         urls: [ 'file://*' ]
     };
 
+    const allowedFileRoots = getAllowedFileRoots();
+
     mainWindow.webContents.session.webRequest.onBeforeSendHeaders(fileFilter, (details, callback) => {
         const requestedPath = path.resolve(URL.fileURLToPath(details.url));
-        const appBasePath = path.resolve(basePath);
+        const isAllowedPath = allowedFileRoots.some(root => isPathInside(root, requestedPath));
 
-        if (!requestedPath.startsWith(appBasePath)) {
+        if (!isAllowedPath) {
             callback({ cancel: true });
             console.warn(`Rejected file URL: ${details.url}`);
 
@@ -641,21 +1120,35 @@ function createJitsiMeetWindow() {
         }
     });
 
+    mainWindow.webContents.session.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details) => {
+        const allowed = permission !== 'openExternal';
+
+        updatePermissionState(permission, allowed ? 'allowed-check' : 'blocked-check', {
+            ...(details || {}),
+            requestingOrigin
+        });
+
+        return allowed;
+    });
+
     // Block opening any external applications.
     mainWindow.webContents.session.setPermissionRequestHandler((_, permission, callback, details) => {
         if (permission === 'openExternal') {
-            console.warn(`Disallowing opening ${details.externalURL}`);
+            console.warn(`Disallowing opening ${details?.externalURL || 'external URL'}`);
+            updatePermissionState(permission, 'blocked', details);
             callback(false);
 
             return;
         }
 
+        updatePermissionState(permission, 'allowed', details);
         callback(true);
     });
 
     initPopupsConfigurationMain(mainWindow, windowOpenHandler);
     setupPictureInPictureMain(mainWindow);
     setupPowerMonitorMain(mainWindow);
+    setupJitsiScreenShareSourceHandler();
     setupScreenShareHandler(mainWindow);
     if (ENABLE_REMOTE_CONTROL) {
         setupRemoteControlMain(mainWindow);
@@ -725,6 +1218,44 @@ function createWebRTCInternalsWindow() {
     webrtcInternalsWindow.loadURL('chrome://webrtc-internals');
 }
 
+function getSupportedProtocolRoute(fullProtocolCall) {
+    try {
+        const parsed = new URL.URL(fullProtocolCall);
+        const expectedProtocol = `${config.default.appProtocolPrefix}:`;
+
+        if (parsed.protocol !== expectedProtocol) {
+            return null;
+        }
+
+        const segments = [
+            parsed.hostname,
+            ...parsed.pathname.split('/')
+        ].filter(Boolean);
+
+        if (!segments.length) {
+            return '';
+        }
+
+        if (segments.length !== 2 || segments[0] !== 'meeting') {
+            return null;
+        }
+
+        const meetingId = decodeURIComponent(segments[1]);
+
+        if (!/^[A-Za-z0-9._~-]+$/.test(meetingId)) {
+            return null;
+        }
+
+        return `meeting/${encodeURIComponent(meetingId)}`;
+    } catch (err) {
+        recordDiagnosticEvent('protocol-link-parse-error', {
+            message: err.message
+        });
+
+        return null;
+    }
+}
+
 /**
  * Handler for hashmeet:// protocol links. Navigates the main window to
  * the corresponding meet.hashmicro.com URL.
@@ -738,14 +1269,27 @@ function handleProtocolCall(fullProtocolCall) {
         return;
     }
 
-    const inputURL = fullProtocolCall.replace(appProtocolSurplus, '').replace(/^\/+/, '');
-    const target = `${config.default.defaultServerURL}/${inputURL}`;
+    const route = getSupportedProtocolRoute(fullProtocolCall);
+
+    if (route === null) {
+        console.warn(`Rejected unsupported protocol URL: ${redactDiagnosticString(fullProtocolCall)}`);
+        recordDiagnosticEvent('protocol-link-rejected', {
+            url: fullProtocolCall
+        });
+
+        return;
+    }
+
+    const target = buildHashMeetURL(route);
 
     if (app.isReady() && mainWindow === null) {
         createJitsiMeetWindow();
     }
 
     if (mainWindow) {
+        recordDiagnosticEvent('protocol-link-opened', {
+            route: route || 'home'
+        });
         mainWindow.loadURL(target);
     }
 }
@@ -864,6 +1408,20 @@ ipcMain.on('renderer-ready', () => {
 ipcMain.on('jitsi-open-url', (event, someUrl) => {
     openExternalLink(someUrl);
 });
+
+ipcMain.handle('desktop:get-info', () => getDesktopInfo());
+
+ipcMain.handle('permissions:get-status', () => getPermissionStatus());
+
+ipcMain.on('diagnostics:record', (_event, payload) => {
+    if (payload && typeof payload === 'object' && payload.type) {
+        recordDiagnosticEvent(payload.type, payload.payload || {});
+    } else {
+        recordDiagnosticEvent('renderer-event', payload || {});
+    }
+});
+
+ipcMain.handle('diagnostics:copy', () => copyDiagnosticsToClipboard());
 
 /**
  * Restore the meeting window (e.g. from PiP).

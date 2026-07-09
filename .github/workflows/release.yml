@@ -11,6 +11,9 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-mac:
     name: macOS
@@ -22,14 +25,23 @@ jobs:
           node-version-file: '.nvmrc'
       - name: Install
         run: npm ci
+      - name: Check syntax
+        run: npm run check:syntax
+      - name: Smoke build
+        run: npm run smoke
       - name: Build & package (publish on tag)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            npm run dist -- --publish always
+            npm run dist -- --mac --publish always
           else
-            npm run dist -- --publish never
+            npm run dist -- --mac --publish never
           fi
       - uses: actions/upload-artifact@v4
         with:
@@ -49,15 +61,21 @@ jobs:
           node-version-file: '.nvmrc'
       - name: Install
         run: npm ci
+      - name: Check syntax
+        run: npm run check:syntax
+      - name: Smoke build
+        run: npm run smoke
       - name: Build & package (publish on tag)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         shell: bash
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            npm run dist -- --publish always
+            npm run dist -- --win --publish always
           else
-            npm run dist -- --publish never
+            npm run dist -- --win --publish never
           fi
       - uses: actions/upload-artifact@v4
         with:
@@ -65,3 +83,34 @@ jobs:
           path: |
             dist/HashMeet-*.exe
             dist/latest.yml
+
+  build-linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+      - name: Install
+        run: npm ci
+      - name: Check syntax
+        run: npm run check:syntax
+      - name: Smoke build
+        run: npm run smoke
+      - name: Build & package (publish on tag)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            npm run dist -- --linux --publish always
+          else
+            npm run dist -- --linux --publish never
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: |
+            dist/HashMeet-*.AppImage
+            dist/HashMeet-*.deb
+            dist/latest-linux.yml

@@ -1,6 +1,6 @@
 {
   "name": "hashmeet-desktop",
-  "version": "0.1.6",
+  "version": "0.1.7-staging.1",
   "description": "HashMeet desktop app",
   "main": "./build/main.js",
   "productName": "HashMeet",
@@ -10,7 +10,10 @@
     "clean": "rm -rf node_modules build dist",
     "lint": "eslint .",
     "lint-fix": "eslint . --fix",
+    "check:syntax": "node --check main.js app/preload/preload.js",
     "build": "webpack --config ./webpack.main.js --mode production && webpack --config ./webpack.renderer.js --mode production",
+    "smoke": "npm run build",
+    "verify": "npm run check:syntax && npm run smoke",
     "dist": "npm run build && electron-builder",
     "icons": "node scripts/build-icons.js",
     "postinstall": "patch-package",
@@ -70,6 +73,27 @@
           "target": "nsis"
         }
       ]
+    },
+    "linux": {
+      "artifactName": "HashMeet-${version}-${arch}.${ext}",
+      "target": [
+        {
+          "arch": [
+            "x64"
+          ],
+          "target": "AppImage"
+        },
+        {
+          "arch": [
+            "x64"
+          ],
+          "target": "deb"
+        }
+      ],
+      "category": "Network",
+      "maintainer": "HashMicro",
+      "synopsis": "HashMeet desktop app",
+      "description": "HashMeet desktop app for meetings, calls, and screen sharing."
     },
     "directories": {
       "buildResources": "resources"

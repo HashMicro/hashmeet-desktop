@@ -1,199 +1,157 @@
-# Jitsi Meet Electron
+# HashMeet Desktop
 
-Desktop application for [Jitsi Meet] built with [Electron].
+HashMeet Desktop is the Electron shell for the HashMeet Laravel web app. The
+desktop app loads the live web UI directly, so feature parity comes from the
+`hashmeet` project while this repo owns native desktop behavior.
 
-![](screenshot.png)
+## What This App Owns
 
-## Features
+- Window chrome, app menu, tray hide/show, and quit behavior.
+- Camera, microphone, screen-share, and desktop media integration.
+- Native screen-share picker and always-on-top sharing toolbar.
+- `hashmeet://` deeplink handling, for example
+  `hashmeet://meeting/<meeting-id>`.
+- External link handling, auto-updates, icons, and packaged installers.
 
-- [End-to-End Encryption](https://jitsi.org/blog/e2ee/) support (BETA)
-- Works with any Jitsi Meet deployment
-- Built-in auto-updates
-- Screen sharing
-- ~Remote control~ (currently [disabled](https://github.com/jitsi/jitsi-meet-electron/issues/483) due to [security issues](https://github.com/jitsi/security-advisories/blob/master/advisories/JSA-2020-0001.md))
-- Always-On-Top window
-- Support for deeplinks such as `jitsi-meet://myroom` (will open `myroom` on the configured Jitsi instance) or `jitsi-meet://jitsi.mycompany.com/myroom` (will open `myroom` on the Jitsi instance running on `jitsi.mycompany.com`)
+The Laravel web app remains the source of truth for login, dashboard, meetings,
+recordings, transcripts, snippets, Zoom fallback, lobby, profile, and admin
+screens.
 
-## Installation
+## Requirements
 
-Download our latest release and you're off to the races!
+- Node.js 22 or newer.
+- npm.
+- A running HashMeet web app. For local development, run the sibling
+  `../hashmeet` project on `http://localhost:8888`.
 
-| Windows | macOS | GNU/Linux (AppImage) | GNU/Linux (Deb) |
-| -- | -- | -- | -- |
-| [Download](https://github.com/jitsi/jitsi-meet-electron/releases/latest/download/jitsi-meet.exe) | [Download](https://github.com/jitsi/jitsi-meet-electron/releases/latest/download/jitsi-meet.dmg) | [x64_64](https://github.com/jitsi/jitsi-meet-electron/releases/latest/download/jitsi-meet-x86_64.AppImage) [arm64](https://github.com/jitsi/jitsi-meet-electron/releases/latest/download/jitsi-meet-arm64.AppImage) | [x86_64](https://github.com/jitsi/jitsi-meet-electron/releases/latest/download/jitsi-meet-amd64.deb) [arm64](https://github.com/jitsi/jitsi-meet-electron/releases/latest/download/jitsi-meet-arm64.deb) |
-
-### Third-Party builds
-
-[<img src="https://dl.flathub.org/assets/badges/flathub-badge-en.svg"
-     alt="Download On Flathub"
-     height="60">](https://flathub.org/apps/details/org.jitsi.jitsi-meet)
-
-### Homebrew
-
-For *macOS* users, you can install the application using the following command:
-
-```
-brew install --cask jitsi-meet
-```
-
-## Development
-
-If you want to hack on this project, here is how you do it.
-
-<details><summary>Show building instructions</summary>
-
-#### Installing dependencies
-
-Install Node.js 22 first (or if you use [nvm](https://github.com/nvm-sh/nvm), switch to it by running `nvm use`).
-
-<details><summary>Extra dependencies for Windows</summary>
+Linux development may also need native packages used by Electron and icons:
 
 ```bash
-npm install --global --production windows-build-tools
+sudo apt install libx11-dev zlib1g-dev libpng-dev libxtst-dev libfuse2
 ```
-</details>
 
-<details><summary>Extra dependencies for GNU/Linux</summary>
+For Linux screen sharing, the runtime system also needs PipeWire and a working
+desktop portal. On Arch/CachyOS/Hyprland, install and enable packages such as
+`pipewire`, `xdg-desktop-portal`, and `xdg-desktop-portal-hyprland`.
 
-X11, PNG, and zlib development packages are necessary. On Debian-like systems, they can be installed as follows:
+On Arch/CachyOS, local deb packaging with electron-builder may also need
+`libxcrypt-compat` because the bundled `fpm` binary loads `libcrypt.so.1`.
+
+## Run Locally
+
+Start the web app first:
 
 ```bash
-sudo apt install libx11-dev zlib1g-dev libpng-dev libxtst-dev
-```
-</details>
-
-Install all required packages:
-
-```bash
+cd /home/grandonk/Work-Hashmicro/hashmeet-project/hashmeet
+composer install
 npm install
+[ -f .env ] || cp .env.example .env
+grep -q '^APP_KEY=base64:' .env || php artisan key:generate
+php artisan migrate --seed
+npm run dev
 ```
 
-#### Starting in development mode
+In another terminal, serve Laravel on the URL expected by the local desktop
+configuration:
 
 ```bash
+cd /home/grandonk/Work-Hashmicro/hashmeet-project/hashmeet
+php artisan serve --host=127.0.0.1 --port=8888
+```
+
+If you are working on recordings, transcripts, summaries, or queued mail, also
+run a worker:
+
+```bash
+cd /home/grandonk/Work-Hashmicro/hashmeet-project/hashmeet
+php artisan queue:work
+```
+
+Install and run the desktop app:
+
+```bash
+cd /home/grandonk/Work-Hashmicro/hashmeet-project/hashmeet-desktop
+npm install
+HASHMEET_DESKTOP_SERVER_URL=http://localhost:8888 npm start
+```
+
+On Windows PowerShell:
+
+```powershell
+cd C:\path\to\hashmeet-project\hashmeet-desktop
+npm install
+$env:HASHMEET_DESKTOP_SERVER_URL="http://localhost:8888"
 npm start
 ```
 
-The debugger tools are available when running in dev mode, and can be activated with keyboard shortcuts as [defined here](https://github.com/sindresorhus/electron-debug#features).
-
-They can also be displayed automatically with the application `--show-dev-tools` command line flag, or with the `SHOW_DEV_TOOLS` environment variable as shown:
+To open DevTools automatically during development:
 
 ```bash
-SHOW_DEV_TOOLS=true npm start
+SHOW_DEV_TOOLS=true HASHMEET_DESKTOP_SERVER_URL=http://localhost:8888 npm start
 ```
 
-#### Building the production distribution
+If `HASHMEET_DESKTOP_SERVER_URL` is not set, the app loads
+`https://meet.hashmicro.com`.
+
+Packaged production builds always load `https://meet.hashmicro.com` by default.
+`HASHMEET_DESKTOP_SERVER_URL` is ignored in packaged mode unless the build is
+started with `HASHMEET_DESKTOP_ALLOW_SERVER_OVERRIDE=true` or
+`--allow-server-override` for an explicit test run.
+
+## Development Checks
+
+```bash
+npm run check:syntax
+npm run build
+npm run smoke
+npm run verify
+```
+
+The `npm run lint` target exists, but this repo currently has inherited lint
+violations in `main.js` and `scripts/build-icons.js`; treat it as a cleanup
+target before making it required in CI.
+
+Build installers locally:
 
 ```bash
 npm run dist
+npm run dist -- --linux --publish never
 ```
 
-#### Working with `jitsi-meet-electron-sdk`
+## Desktop Parity Checklist
 
-[`jitsi-meet-electron-sdk`] is a helper package which implements many features
-such as remote control and the always-on-top window. If new features are to be
-added or tested, running with a local version of these utils is very handy.
+- Web app loads the expected environment URL.
+- Login and dashboard work in the desktop window.
+- A meeting can be created and joined.
+- Camera and microphone permission prompts work.
+- Screen sharing opens the native picker.
+- The native floating toolbar can pause/resume sharing, mute/unmute, and stop
+  sharing.
+- Closing the main window hides to tray; Quit exits the app.
+- `hashmeet://meeting/<meeting-id>` opens the configured HashMeet server.
+- External web links open in the system browser.
+- Copy Diagnostics works and does not include auth tokens, cookies, URL query
+  strings, URL fragments, or unredacted home-directory paths.
 
-By default, the @jitsi/electron-sdk is build from `npm`. The default dependency path in `package.json` is:
+## Packaging Notes
 
-```json
-"@jitsi/electron-sdk": "^3.0.0"
-```
+Installer metadata lives in `package.json` under the `build` key.
 
-To work with a local copy, you must change the path to:
+Release builds are produced by `.github/workflows/release.yml` on version tags
+such as `v0.1.7`. The workflow packages:
 
-```json
-"@jitsi/electron-sdk": "file:///Users/name/jitsi-meet-electron-sdk-copy",
-```
+- macOS universal `dmg` and `zip`.
+- Windows x64 `nsis` installer.
+- Linux x64 `AppImage` and `deb`.
 
-To build the project, you must force it to take the sources, as `npm update` will
-not do it.
+The workflow publishes update metadata for `electron-updater` when running on a
+tag. Configure these repository secrets before treating a release as production
+ready:
 
-```bash
-npm install @jitsi/electron-sdk --force
-```
+- `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`
+- `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`
+- `WIN_CSC_LINK`, `WIN_CSC_KEY_PASSWORD`
 
-NOTE: Also check the [`jitsi-meet-electron-sdk` `README`] to see how to configure
-your environment.
-
-#### Publishing
-
-1. Create release branch: `git checkout -b release-1-2-3`, replacing `1-2-3` with the desired release version
-2. Increment the version: `npm version patch`, replacing `patch` with `minor` or `major` as required
-3. Push release branch to github: `git push -u origin release-1-2-3`
-4. Create PR: `gh pr create`
-5. Once PR is reviewed and ready to merge, create draft Github release: `gh release create v1.2.3 --draft --title 1.2.3`, replacing `v1.2.3` and `1.2.3` with the desired release version
-6. Merge PR
-7. Github action will build binaries and attach to the draft release
-8. Test binaries from draft release
-9. If all tests are fine, publish draft release
-
-</details>
-
-## Known issues
-
-### Windows
-
-A warning that the app is unsigned will show up upon first install. This is expected.
-
-### macOS
-
-None
-
-### GNU/Linux
-
-* If you can't execute the file directly after downloading it, try running `chmod u+x ./jitsi-meet-x86_64.AppImage`
-
-* On Ubuntu 22.04 and later, the AppImage will fail with a FUSE error (as the AppImage uses `libfuse2`, while 22.04 comes with `libfuse3` by default):
-
-  ```
-  dlopen(): error loading libfuse.so.2
-  ```
-
-  To fix this, install `libfuse2` as follows:
-
-  ```
-  sudo apt install libfuse2
-  ```
-
-* On Ubuntu 24.04 and later, the AppImage will fail with a sandboxing error (`The SUID sandbox helper binary was found, but is not configured correctly...`)
-  This is due to an AppArmor conflict that restricts unprivileged user namespaces ([jitsi/jitsi-meet-electron#965](https://github.com/jitsi/jitsi-meet-electron/issues/965),
-  [Ubuntu blog post](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces)).
-
-  To work around this, disable the use of the sandbox with `--no-sandbox`:
-
-  ```
-  ./jitsi-meet-x86_64.AppImage --no-sandbox
-  ```
-  
-* If you experience a blank page after a Jitsi server upgrades, try removing the local cache files:
-
-  ```
-  rm -rf ~/.config/Jitsi\ Meet/
-  ```
-
-## Translations
-
-The JSON files contain all the strings inside the application, and can be translated [here](/app/i18n/lang).
-
-New translations require the addition of a line in [index.js](/app/i18n/index.js).
-
-`Localize desktop file on linux` requires the addition of a line in [package.json](/package.json).
-Please search for `Comment[hu]` as an example to help add your translation of the English string `Jitsi Meet Desktop App` for your language.
-
-## License
-
-Apache License 2.0. See the [LICENSE] file.
-
-## Community
-
-Jitsi is built by a large community of developers. If you want to participate,
-please join the [community forum].
-
-[Jitsi Meet]: https://github.com/jitsi/jitsi-meet
-[Electron]: https://electronjs.org/
-[latest release]: https://github.com/jitsi/jitsi-meet-electron/releases/latest
-[`jitsi-meet-electron-sdk`]: https://github.com/jitsi/jitsi-meet-electron-sdk
-[`jitsi-meet-electron-sdk` `README`]: https://github.com/jitsi/jitsi-meet-electron-sdk/blob/master/README.md
-[community forum]: https://community.jitsi.org/
-[LICENSE]: LICENSE
+Production QA steps are in `docs/PRODUCTION-QA.md`. Internal signed install
+instructions are in `docs/INSTALL-INTERNAL.md`. Linux screen-share
+troubleshooting is in `docs/LINUX-TROUBLESHOOTING.md`.

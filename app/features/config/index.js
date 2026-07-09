@@ -22,7 +22,7 @@ export default {
     appProtocolPrefix: 'hashmeet',
 
     /**
-     * The default server URL of Jitsi Meet Deployment that will be used.
+     * The default HashMeet web app URL loaded by the desktop shell.
      */
     defaultServerURL: 'https://meet.hashmicro.com',
 

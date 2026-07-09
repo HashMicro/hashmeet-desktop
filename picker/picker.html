@@ -4,111 +4,422 @@
 <meta charset="utf-8">
 <title>Choose what to share</title>
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: dark;
+    --bg: #171717;
+    --panel: #232323;
+    --panel-2: #2d2d2d;
+    --border: #3a3a3a;
+    --text: #f3f4f6;
+    --muted: #a1a1aa;
+    --accent: #2563eb;
+    --accent-2: #60a5fa;
+  }
+
+  * { box-sizing: border-box; }
+
   html, body {
-    margin: 0; padding: 0; height: 100%;
-    background: #1a1a1a; color: #f0f0f0;
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Manrope, sans-serif;
-    font-size: 13px; overflow: hidden;
+    font-size: 13px;
+    overflow: hidden;
   }
-  .wrap { display: flex; flex-direction: column; height: 100%; padding: 20px; box-sizing: border-box; }
-  h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; }
-  .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-shrink: 0; }
+
+  .wrap {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 18px;
+    gap: 14px;
+  }
+
+  .top {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(220px, 320px);
+    gap: 16px;
+    align-items: end;
+  }
+
+  h2 {
+    margin: 0 0 4px;
+    font-size: 18px;
+    line-height: 1.2;
+    font-weight: 650;
+  }
+
+  .subtitle {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .search {
+    position: relative;
+  }
+
+  .search input {
+    width: 100%;
+    height: 36px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    outline: none;
+    background: var(--panel);
+    color: var(--text);
+    font: inherit;
+  }
+
+  .search input:focus {
+    border-color: var(--accent-2);
+    box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.18);
+  }
+
+  .tabs {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
   .tab {
-    padding: 7px 14px; background: #2a2a2a; border: 1px solid #333;
-    border-radius: 6px; cursor: pointer; color: #ccc; font-size: 13px;
-    font-family: inherit;
+    min-width: 128px;
+    height: 34px;
+    padding: 0 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    color: #d4d4d8;
+    font: inherit;
+    font-weight: 600;
   }
-  .tab:hover { background: #333; }
-  .tab.active { background: #3b82f6; color: white; border-color: #3b82f6; }
-  .grid-wrap { flex: 1; overflow-y: auto; min-height: 0; }
+
+  .tab:hover { background: var(--panel-2); }
+
+  .tab.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+
+  .grid-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+
   .grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-    gap: 10px; padding-right: 4px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 12px;
   }
+
   .source {
-    cursor: pointer; border: 2px solid transparent; border-radius: 8px;
-    overflow: hidden; background: #242424; transition: border-color .12s, transform .12s;
+    cursor: pointer;
+    border: 2px solid transparent;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--panel);
+    transition: border-color 120ms, transform 120ms, background 120ms;
   }
-  .source:hover { border-color: #3b82f6; }
-  .source:active { transform: scale(0.98); }
-  .source .thumb {
-    width: 100%; aspect-ratio: 16 / 10; background: #000;
-    display: flex; align-items: center; justify-content: center;
+
+  .source:hover,
+  .source.focused {
+    border-color: var(--accent-2);
+    background: #282828;
   }
-  .source .thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
-  .source .name {
-    padding: 8px 10px; font-size: 12px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    border-top: 1px solid #2f2f2f;
+
+  .source:active { transform: scale(0.99); }
+
+  .thumb {
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    background: #0a0a0a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
-  .empty { color: #888; padding: 40px; text-align: center; }
-  .footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; flex-shrink: 0; }
+
+  .thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+
+  .meta {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+    padding: 9px 10px;
+    border-top: 1px solid #303030;
+  }
+
+  .name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .badge {
+    border: 1px solid #444;
+    border-radius: 999px;
+    padding: 2px 7px;
+    color: #d4d4d8;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .empty {
+    grid-column: 1 / -1;
+    color: var(--muted);
+    padding: 48px 12px;
+    text-align: center;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+  }
+
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    flex-shrink: 0;
+    align-items: center;
+  }
+
+  .hint {
+    color: var(--muted);
+    font-size: 11px;
+  }
+
   .btn {
-    padding: 8px 16px; border-radius: 6px; border: 1px solid #333;
-    background: #2a2a2a; color: #f0f0f0; cursor: pointer; font-size: 13px; font-family: inherit;
+    min-width: 88px;
+    height: 36px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+    font-weight: 600;
   }
-  .btn:hover { background: #333; }
+
+  .btn:hover { background: var(--panel-2); }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h2>Choose what to share</h2>
+  <div class="top">
+    <div>
+      <h2>Choose what to share</h2>
+      <div class="subtitle" id="summary">Loading available screens and windows.</div>
+    </div>
+    <label class="search">
+      <input id="search" type="search" placeholder="Search screens or windows" autocomplete="off">
+    </label>
+  </div>
   <div class="tabs">
-    <button class="tab active" data-type="screen">Entire Screen</button>
-    <button class="tab" data-type="window">Window</button>
+    <button class="tab active" data-type="screen" id="tab-screen">Entire Screen</button>
+    <button class="tab" data-type="window" id="tab-window">Window</button>
   </div>
   <div class="grid-wrap"><div class="grid" id="grid"></div></div>
-  <div class="footer"><button class="btn" id="cancel">Cancel</button></div>
+  <div class="footer">
+    <div class="hint">Use arrow keys to move, Enter to share, Escape to cancel.</div>
+    <button class="btn" id="cancel">Cancel</button>
+  </div>
 </div>
 <script>
   const { ipcRenderer } = require('electron');
+  const grid = document.getElementById('grid');
+  const search = document.getElementById('search');
+  const summary = document.getElementById('summary');
+  const tabs = Array.from(document.querySelectorAll('.tab'));
   let sources = [];
-  let activeType = 'screen';
+  let activeType = localStorage.getItem('hashmeet.sharePicker.type') || 'screen';
+  let focusedIndex = 0;
 
-  ipcRenderer.on('sources', (_ev, list) => { sources = list; render(); });
+  function typeLabel(type) {
+    return type === 'screen' ? 'Screen' : 'Window';
+  }
 
-  function render() {
-    const grid = document.getElementById('grid');
-    grid.innerHTML = '';
-    const filtered = sources.filter(s => s.type === activeType);
-    if (filtered.length === 0) {
-      grid.innerHTML = '<div class="empty">No ' + activeType + 's available.</div>';
-      return;
-    }
-    filtered.forEach(src => {
-      const el = document.createElement('div');
-      el.className = 'source';
-      el.tabIndex = 0;
-      const thumb = document.createElement('div');
-      thumb.className = 'thumb';
-      const img = document.createElement('img');
-      img.src = src.thumbnail;
-      thumb.appendChild(img);
-      const name = document.createElement('div');
-      name.className = 'name';
-      name.textContent = src.name || src.id;
-      el.appendChild(thumb); el.appendChild(name);
-      el.addEventListener('click', () => select(src.id));
-      el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') select(src.id); });
-      grid.appendChild(el);
+  function getFiltered() {
+    const query = search.value.trim().toLowerCase();
+
+    return sources.filter(source => {
+      const matchesType = source.type === activeType;
+      const matchesQuery = !query || String(source.name || source.id).toLowerCase().includes(query);
+
+      return matchesType && matchesQuery;
     });
   }
 
-  function select(id) { ipcRenderer.send('picker:select', id); }
-  function cancel() { ipcRenderer.send('picker:select', null); }
+  function updateTabs() {
+    const counts = sources.reduce((acc, source) => {
+      acc[source.type] = (acc[source.type] || 0) + 1;
 
-  document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      activeType = tab.dataset.type;
-      render();
+      return acc;
+    }, {});
+
+    tabs.forEach(tab => {
+      const type = tab.dataset.type;
+      const count = counts[type] || 0;
+
+      tab.classList.toggle('active', type === activeType);
+      tab.textContent = `${type === 'screen' ? 'Entire Screen' : 'Window'} (${count})`;
     });
+  }
+
+  function updateSummary(filtered) {
+    const total = sources.length;
+    const count = filtered.length;
+    const suffix = count === 1 ? '' : 's';
+
+    summary.textContent = total
+      ? `${count} ${activeType}${suffix} available.`
+      : 'No share sources are available.';
+  }
+
+  function focusCard(index) {
+    const cards = Array.from(grid.querySelectorAll('.source'));
+
+    cards.forEach(card => card.classList.remove('focused'));
+    if (!cards.length) return;
+
+    focusedIndex = Math.max(0, Math.min(index, cards.length - 1));
+    cards[focusedIndex].classList.add('focused');
+    cards[focusedIndex].focus({ preventScroll: true });
+    cards[focusedIndex].scrollIntoView({ block: 'nearest' });
+  }
+
+  function render() {
+    const filtered = getFiltered();
+
+    updateTabs();
+    updateSummary(filtered);
+    grid.innerHTML = '';
+
+    if (filtered.length === 0) {
+      const empty = document.createElement('div');
+
+      empty.className = 'empty';
+      empty.textContent = search.value.trim()
+        ? 'No matching sources.'
+        : `No ${activeType}s available.`;
+      grid.appendChild(empty);
+
+      return;
+    }
+
+    filtered.forEach((src, index) => {
+      const el = document.createElement('div');
+      const thumb = document.createElement('div');
+      const img = document.createElement('img');
+      const meta = document.createElement('div');
+      const name = document.createElement('div');
+      const badge = document.createElement('span');
+
+      el.className = 'source';
+      el.tabIndex = 0;
+      el.dataset.index = String(index);
+      thumb.className = 'thumb';
+      img.src = src.thumbnail;
+      img.alt = '';
+      meta.className = 'meta';
+      name.className = 'name';
+      name.title = src.name || src.id;
+      name.textContent = src.name || src.id;
+      badge.className = 'badge';
+      badge.textContent = typeLabel(src.type);
+
+      thumb.appendChild(img);
+      meta.appendChild(name);
+      meta.appendChild(badge);
+      el.appendChild(thumb);
+      el.appendChild(meta);
+      el.addEventListener('click', () => select(src.id));
+      el.addEventListener('focus', () => {
+        focusedIndex = index;
+        grid.querySelectorAll('.source').forEach(card => card.classList.remove('focused'));
+        el.classList.add('focused');
+      });
+      grid.appendChild(el);
+    });
+
+    focusCard(Math.min(focusedIndex, filtered.length - 1));
+  }
+
+  function setActiveType(type) {
+    activeType = type;
+    focusedIndex = 0;
+    localStorage.setItem('hashmeet.sharePicker.type', activeType);
+    render();
+  }
+
+  function select(id) {
+    ipcRenderer.send('picker:select', id);
+  }
+
+  function cancel() {
+    ipcRenderer.send('picker:select', null);
+  }
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => setActiveType(tab.dataset.type));
+  });
+
+  search.addEventListener('input', () => {
+    focusedIndex = 0;
+    render();
   });
 
   document.getElementById('cancel').addEventListener('click', cancel);
-  window.addEventListener('keydown', e => { if (e.key === 'Escape') cancel(); });
+  window.addEventListener('keydown', event => {
+    const filtered = getFiltered();
+
+    if (event.key === 'Escape') {
+      cancel();
+      return;
+    }
+
+    if (!filtered.length) return;
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      select(filtered[focusedIndex].id);
+      return;
+    }
+
+    if ([ 'ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp' ].includes(event.key)) {
+      const columns = Math.max(1, Math.floor(grid.clientWidth / 222));
+      let next = focusedIndex;
+
+      if (event.key === 'ArrowRight') next += 1;
+      if (event.key === 'ArrowLeft') next -= 1;
+      if (event.key === 'ArrowDown') next += columns;
+      if (event.key === 'ArrowUp') next -= columns;
+
+      event.preventDefault();
+      focusCard(next);
+    }
+  });
+
+  ipcRenderer.on('sources', (_ev, list) => {
+    sources = Array.isArray(list) ? list : [];
+    if (!sources.some(source => source.type === activeType)) {
+      activeType = sources.some(source => source.type === 'screen') ? 'screen' : 'window';
+    }
+    render();
+    search.focus();
+  });
+
+  updateTabs();
 </script>
 </body>
 </html>

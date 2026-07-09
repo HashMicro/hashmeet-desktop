@@ -20,7 +20,7 @@ export function openExternalLink(link) {
     const proto = u.protocol;
     const href = u.href;
 
-    if (proto === 'http:' || proto === 'https:' || proto === 'mailto:') {
+    if (proto === 'http:' || proto === 'https:') {
         shell.openExternal(href);
     }
 }

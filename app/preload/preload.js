@@ -12,12 +12,20 @@ const whitelistedSendChannels = [
     'restore-meeting-window',
     'toolbar:open',
     'toolbar:close',
-    'toolbar:state'
+    'toolbar:state',
+    'diagnostics:record'
 ];
 
 const whitelistedReceiveChannels = [
     'protocol-data-msg',
-    'toolbar:action'
+    'toolbar:action',
+    'desktop:screen-source-selected'
+];
+
+const whitelistedInvokeChannels = [
+    'desktop:get-info',
+    'permissions:get-status',
+    'diagnostics:copy'
 ];
 
 ipcRenderer.setMaxListeners(0);
@@ -76,6 +84,17 @@ window.jitsiNodeAPI = {
 
             return remove;
         },
+        invoke: (channel, data) => {
+            if (!whitelistedInvokeChannels.includes(channel)) {
+                return Promise.resolve(null);
+            }
+
+            if (data === undefined) {
+                return ipcRenderer.invoke(channel);
+            }
+
+            return ipcRenderer.invoke(channel, data);
+        },
         send: (channel, data) => {
             if (!whitelistedSendChannels.includes(channel)) {
                 return;
@@ -98,6 +117,30 @@ window.jitsiNodeAPI = {
             ipcRenderer.addListener('toolbar:action', handler);
 
             return () => ipcRenderer.removeListener('toolbar:action', handler);
+        }
+    },
+    desktop: {
+        getInfo: () => ipcRenderer.invoke('desktop:get-info')
+    },
+    permissions: {
+        getStatus: () => ipcRenderer.invoke('permissions:get-status')
+    },
+    diagnostics: {
+        record: (type, payload) => {
+            ipcRenderer.send('diagnostics:record', {
+                type,
+                payload: payload || {}
+            });
+        },
+        copy: () => ipcRenderer.invoke('diagnostics:copy')
+    },
+    screenShare: {
+        onSourceSelected: cb => {
+            const handler = (_event, payload) => cb(payload);
+
+            ipcRenderer.addListener('desktop:screen-source-selected', handler);
+
+            return () => ipcRenderer.removeListener('desktop:screen-source-selected', handler);
         }
     }
 };

@@ -1,27 +1,35 @@
 ---
 name: Bug Report
-about: Before posting, please make sure you check https://community.jitsi.org
-
+about: Report a HashMeet Desktop bug
 ---
-
-*This Issue tracker is only for reporting bugs and tracking code related issues.*
-
-Before posting, please make sure you check community.jitsi.org to see if the same or similar bugs have already been discussed. General questions, installation help, and feature requests can also be posted to community.jitsi.org.
 
 ## Description
----
 
-## Current behavior
----
+## Current Behavior
 
 ## Expected Behavior
----
 
-## Possible Solution
----
+## Steps To Reproduce
 
-## Steps to reproduce
----
+1.
+2.
+3.
 
-# Environment details
----
+## Environment
+
+- HashMeet Desktop version:
+- OS and version:
+- CPU architecture:
+- Installer type: dmg / exe / AppImage / deb / development
+- Linux session, if applicable: X11 / Wayland / Hyprland / Sway / GNOME / KDE
+
+## Browser Comparison
+
+Does the same issue happen in a regular browser at `https://meet.hashmicro.com`?
+
+## Diagnostics
+
+Use **Help -> Copy Diagnostics** after reproducing the issue and paste the
+redacted JSON here, or attach it to the internal report.
+
+## Notes
