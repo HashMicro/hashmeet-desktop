@@ -29,14 +29,35 @@ jobs:
         run: npm run check:syntax
       - name: Smoke build
         run: npm run smoke
+      - name: Configure optional macOS signing
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD_SECRET: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -n "${MAC_CSC_LINK}" && -n "${MAC_CSC_KEY_PASSWORD}" ]]; then
+            {
+              echo "CSC_LINK<<EOF"
+              echo "${MAC_CSC_LINK}"
+              echo "EOF"
+              echo "CSC_KEY_PASSWORD=${MAC_CSC_KEY_PASSWORD}"
+            } >> "${GITHUB_ENV}"
+
+            if [[ -n "${APPLE_ID_SECRET}" && -n "${APPLE_APP_SPECIFIC_PASSWORD_SECRET}" && -n "${APPLE_TEAM_ID_SECRET}" ]]; then
+              {
+                echo "APPLE_ID=${APPLE_ID_SECRET}"
+                echo "APPLE_APP_SPECIFIC_PASSWORD=${APPLE_APP_SPECIFIC_PASSWORD_SECRET}"
+                echo "APPLE_TEAM_ID=${APPLE_TEAM_ID_SECRET}"
+              } >> "${GITHUB_ENV}"
+            fi
+          else
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "${GITHUB_ENV}"
+          fi
       - name: Build & package (publish on tag)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             npm run dist -- --mac --publish always
@@ -65,11 +86,25 @@ jobs:
         run: npm run check:syntax
       - name: Smoke build
         run: npm run smoke
+      - name: Configure optional Windows signing
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -n "${WIN_CSC_LINK}" && -n "${WIN_CSC_KEY_PASSWORD}" ]]; then
+            {
+              echo "CSC_LINK<<EOF"
+              echo "${WIN_CSC_LINK}"
+              echo "EOF"
+              echo "CSC_KEY_PASSWORD=${WIN_CSC_KEY_PASSWORD}"
+            } >> "${GITHUB_ENV}"
+          else
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "${GITHUB_ENV}"
+          fi
       - name: Build & package (publish on tag)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         shell: bash
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
