@@ -3,29 +3,33 @@ const {
     setupScreenSharingRender,
     setupPictureInPictureRender,
     setupRemoteControlRender,
-    setupPowerMonitorRender
+    setupPowerMonitorRender,
 } = require('@jitsi/electron-sdk');
 const { ipcRenderer } = require('electron');
 
+const { normalizeToolbarCommandResult } = require('../../lib/toolbar-contract');
+
 const whitelistedSendChannels = [
-    'renderer-ready',
     'restore-meeting-window',
     'toolbar:open',
     'toolbar:close',
     'toolbar:state',
-    'diagnostics:record'
+    'toolbar:result',
+    'call:set-state',
+    'app:retry',
+    'diagnostics:record',
 ];
 
-const whitelistedReceiveChannels = [
-    'protocol-data-msg',
-    'toolbar:action',
-    'desktop:screen-source-selected'
-];
+const whitelistedReceiveChannels = ['toolbar:action', 'desktop:screen-source-selected', 'media:status-changed'];
 
 const whitelistedInvokeChannels = [
     'desktop:get-info',
     'permissions:get-status',
-    'diagnostics:copy'
+    'media:get-status',
+    'media:request-access',
+    'media:open-settings',
+    'app:copy-diagnostics',
+    'diagnostics:copy',
 ];
 
 ipcRenderer.setMaxListeners(0);
@@ -63,7 +67,34 @@ function setupRenderer(api, options = {}) {
     setupPowerMonitorRender(api);
 }
 
+function subscribeToolbarCommands(callback) {
+    const handler = async (_event, command) => {
+        if (!command || typeof command.commandId !== 'string' || typeof command.action !== 'string') {
+            return;
+        }
+
+        let result;
+
+        try {
+            result = normalizeToolbarCommandResult(command, await callback(command));
+        } catch (error) {
+            result = {
+                commandId: command.commandId,
+                ok: false,
+                error: String(error?.message || 'The screen-share command failed.'),
+            };
+        }
+
+        ipcRenderer.send('toolbar:result', result);
+    };
+
+    ipcRenderer.addListener('toolbar:action', handler);
+
+    return () => ipcRenderer.removeListener('toolbar:action', handler);
+}
+
 window.jitsiNodeAPI = {
+    bridgeVersion: 3,
     openExternalLink,
     setupRenderer,
     ipc: {
@@ -105,42 +136,58 @@ window.jitsiNodeAPI = {
             } else {
                 ipcRenderer.send(channel, data);
             }
-        }
+        },
     },
     toolbar: {
-        open: snapshot => ipcRenderer.send('toolbar:open', snapshot || {}),
+        open: (snapshot) => ipcRenderer.send('toolbar:open', snapshot || {}),
         close: () => ipcRenderer.send('toolbar:close'),
-        sendState: patch => ipcRenderer.send('toolbar:state', patch || {}),
-        onAction: cb => {
-            const handler = (_event, payload) => cb(payload);
-
-            ipcRenderer.addListener('toolbar:action', handler);
-
-            return () => ipcRenderer.removeListener('toolbar:action', handler);
-        }
+        sendState: (patch) => ipcRenderer.send('toolbar:state', patch || {}),
+        onCommand: (cb) => subscribeToolbarCommands(cb),
+        // Compatibility alias for meeting pages built against bridge version 2.
+        onAction: (cb) => subscribeToolbarCommands(cb),
     },
     desktop: {
-        getInfo: () => ipcRenderer.invoke('desktop:get-info')
+        getInfo: () => ipcRenderer.invoke('desktop:get-info'),
     },
     permissions: {
-        getStatus: () => ipcRenderer.invoke('permissions:get-status')
+        getStatus: () => ipcRenderer.invoke('permissions:get-status'),
+    },
+    media: {
+        getStatus: () => ipcRenderer.invoke('media:get-status'),
+        requestAccess: (kind) => ipcRenderer.invoke('media:request-access', kind),
+        openSystemSettings: (kind) => ipcRenderer.invoke('media:open-settings', kind),
+        onStatusChanged: (cb) => {
+            const handler = (_event, status) => cb(status);
+
+            ipcRenderer.addListener('media:status-changed', handler);
+
+            return () => ipcRenderer.removeListener('media:status-changed', handler);
+        },
     },
     diagnostics: {
         record: (type, payload) => {
             ipcRenderer.send('diagnostics:record', {
                 type,
-                payload: payload || {}
+                payload: payload || {},
             });
         },
-        copy: () => ipcRenderer.invoke('diagnostics:copy')
+        copy: () => ipcRenderer.invoke('diagnostics:copy'),
     },
     screenShare: {
-        onSourceSelected: cb => {
+        getCapabilities: () => ipcRenderer.invoke('media:get-status').then((status) => status?.screenShare || null),
+        onSourceSelected: (cb) => {
             const handler = (_event, payload) => cb(payload);
 
             ipcRenderer.addListener('desktop:screen-source-selected', handler);
 
             return () => ipcRenderer.removeListener('desktop:screen-source-selected', handler);
-        }
-    }
+        },
+    },
+    call: {
+        setState: (state) => ipcRenderer.send('call:set-state', state || {}),
+    },
+    offline: {
+        retry: () => ipcRenderer.send('app:retry'),
+        copyDiagnostics: () => ipcRenderer.invoke('app:copy-diagnostics'),
+    },
 };

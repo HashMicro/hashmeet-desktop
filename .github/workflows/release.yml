@@ -25,10 +25,10 @@ jobs:
           node-version-file: '.nvmrc'
       - name: Install
         run: npm ci
-      - name: Check syntax
-        run: npm run check:syntax
-      - name: Smoke build
-        run: npm run smoke
+      - name: Verify
+        run: npm run verify
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
       - name: Configure optional macOS signing
         env:
           MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
@@ -82,10 +82,10 @@ jobs:
           node-version-file: '.nvmrc'
       - name: Install
         run: npm ci
-      - name: Check syntax
-        run: npm run check:syntax
-      - name: Smoke build
-        run: npm run smoke
+      - name: Verify
+        run: npm run verify
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
       - name: Configure optional Windows signing
         env:
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
@@ -129,10 +129,10 @@ jobs:
           node-version-file: '.nvmrc'
       - name: Install
         run: npm ci
-      - name: Check syntax
-        run: npm run check:syntax
-      - name: Smoke build
-        run: npm run smoke
+      - name: Verify
+        run: npm run verify
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
       - name: Build & package (publish on tag)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

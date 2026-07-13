@@ -1,11 +1,9 @@
-/* global __dirname */
-
 const {
     initPopupsConfigurationMain,
     getPopupTarget,
     setupPictureInPictureMain,
     setupRemoteControlMain,
-    setupPowerMonitorMain
+    setupPowerMonitorMain,
 } = require('@jitsi/electron-sdk');
 const {
     BrowserWindow,
@@ -16,7 +14,8 @@ const {
     desktopCapturer,
     ipcMain,
     screen,
-    shell
+    shell,
+    systemPreferences,
 } = require('electron');
 const contextMenu = require('electron-context-menu');
 const debug = require('electron-debug');
@@ -30,13 +29,20 @@ const URL = require('url');
 
 const config = require('./app/features/config');
 const { openExternalLink } = require('./app/features/utils/openExternalLink');
+const { isAllowedLocalhostCertificateURL } = require('./lib/certificate-policy');
+const { CHROME_CSS_INSERT_OPTIONS, getChromeLayout } = require('./lib/chrome-layout');
+const { createDisplayMediaGrant } = require('./lib/display-media-policy');
+const { getScreenShareCapabilities, normalizePermissionStatus } = require('./lib/media-policy');
+const { createOriginPolicy, isTrustedIpcSender, normalizeWebOrigin } = require('./lib/origin-policy');
+const { createToolbarCommandBroker } = require('./lib/toolbar-command-broker');
 const pkgJson = require('./package.json');
 
 const showDevTools = Boolean(process.env.SHOW_DEV_TOOLS) || process.argv.includes('--show-dev-tools');
-const enableDesktopDiagnostics = isDev
-    || showDevTools
-    || process.env.HASHMEET_DESKTOP_DIAGNOSTICS === 'true'
-    || process.argv.includes('--diagnostics');
+const enableDesktopDiagnostics =
+    isDev ||
+    showDevTools ||
+    process.env.HASHMEET_DESKTOP_DIAGNOSTICS === 'true' ||
+    process.argv.includes('--diagnostics');
 
 // For enabling remote control, please change the ENABLE_REMOTE_CONTROL flag in
 // app/features/conference/components/Conference.js to true as well
@@ -45,9 +51,10 @@ const ENABLE_REMOTE_CONTROL = false;
 const HASHMEET_SERVER_URL_ENV = 'HASHMEET_DESKTOP_SERVER_URL';
 const JITSI_SCREEN_SHARE_GET_SOURCES = 'jitsi-screen-sharing-get-sources';
 const defaultServerURL = config.default.defaultServerURL;
-const allowServerURLOverride = isDev
-    || process.env.HASHMEET_DESKTOP_ALLOW_SERVER_OVERRIDE === 'true'
-    || process.argv.includes('--allow-server-override');
+const allowServerURLOverride =
+    isDev ||
+    process.env.HASHMEET_DESKTOP_ALLOW_SERVER_OVERRIDE === 'true' ||
+    process.argv.includes('--allow-server-override');
 
 /**
  * Resolves the HashMeet web app URL used by the desktop shell.
@@ -59,8 +66,8 @@ function resolveServerURL() {
 
     if (envURL && !allowServerURLOverride) {
         console.warn(
-            `[config] Ignoring ${HASHMEET_SERVER_URL_ENV} in packaged mode. `
-            + 'Use development mode or HASHMEET_DESKTOP_ALLOW_SERVER_OVERRIDE=true for test builds.'
+            `[config] Ignoring ${HASHMEET_SERVER_URL_ENV} in packaged mode. ` +
+                'Use development mode or HASHMEET_DESKTOP_ALLOW_SERVER_OVERRIDE=true for test builds.',
         );
     }
 
@@ -69,7 +76,7 @@ function resolveServerURL() {
     try {
         const url = new URL.URL(configuredURL);
 
-        if (![ 'http:', 'https:' ].includes(url.protocol)) {
+        if (!['http:', 'https:'].includes(url.protocol)) {
             throw new Error(`Unsupported protocol: ${url.protocol}`);
         }
 
@@ -79,8 +86,8 @@ function resolveServerURL() {
         return url.toString().replace(/\/$/, '');
     } catch (err) {
         console.warn(
-            `[config] Invalid ${HASHMEET_SERVER_URL_ENV} "${configuredURL}", `
-            + `falling back to ${defaultServerURL}: ${err.message}`
+            `[config] Invalid ${HASHMEET_SERVER_URL_ENV} "${configuredURL}", ` +
+                `falling back to ${defaultServerURL}: ${err.message}`,
         );
 
         return defaultServerURL;
@@ -88,13 +95,20 @@ function resolveServerURL() {
 }
 
 const hashMeetServerURL = resolveServerURL();
+let updateState = { status: 'idle' };
+const trustedWebOrigins = new Set([normalizeWebOrigin(hashMeetServerURL)].filter(Boolean));
+
+function getTrustedOriginPolicy() {
+    return createOriginPolicy([...trustedWebOrigins]);
+}
+
+function isTrustedRemoteIpc(event) {
+    return isTrustedIpcSender(event, getTrustedOriginPolicy());
+}
 
 function getAppBasePathCandidates() {
     const appPath = app.getAppPath();
-    const candidates = [
-        appPath,
-        path.resolve(appPath, '..')
-    ];
+    const candidates = [appPath, path.resolve(appPath, '..')];
 
     if (typeof __dirname === 'string' && path.isAbsolute(__dirname)) {
         candidates.push(__dirname, path.resolve(__dirname, '..'));
@@ -104,12 +118,12 @@ function getAppBasePathCandidates() {
         candidates.push(process.cwd());
     }
 
-    return Array.from(new Set(candidates.map(candidate => path.resolve(candidate))));
+    return Array.from(new Set(candidates.map((candidate) => path.resolve(candidate))));
 }
 
 function resolveAppAssetPath(...segments) {
-    const candidates = getAppBasePathCandidates().map(candidate => path.resolve(candidate, ...segments));
-    const found = candidates.find(candidate => fs.existsSync(candidate));
+    const candidates = getAppBasePathCandidates().map((candidate) => path.resolve(candidate, ...segments));
+    const found = candidates.find((candidate) => fs.existsSync(candidate));
 
     return found || candidates[0];
 }
@@ -121,7 +135,7 @@ function isPathInside(parentPath, childPath) {
 }
 
 function getAllowedFileRoots() {
-    return getAppBasePathCandidates().filter(candidate => fs.existsSync(candidate));
+    return getAppBasePathCandidates().filter((candidate) => fs.existsSync(candidate));
 }
 
 /**
@@ -141,7 +155,7 @@ function buildHashMeetURL(relativePath = '') {
 const disabledFeatures = [
     'ThumbnailCapturerMac:capture_mode/sc_screenshot_manager',
     'ScreenCaptureKitPickerScreen',
-    'ScreenCaptureKitStreamPickerSonoma'
+    'ScreenCaptureKitStreamPickerSonoma',
 ];
 
 app.commandLine.appendSwitch('disable-features', disabledFeatures.join(','));
@@ -163,6 +177,34 @@ app.commandLine.appendSwitch('disable-background-timer-throttling');
 autoUpdater.logger = require('electron-log');
 autoUpdater.logger.transports.file.level = 'info';
 
+autoUpdater.on('checking-for-update', () => {
+    updateState = { status: 'checking', checkedAt: new Date().toISOString() };
+    recordDiagnosticEvent('update-checking');
+});
+autoUpdater.on('update-available', (info) => {
+    updateState = { status: 'available', version: info.version };
+    recordDiagnosticEvent('update-available', updateState);
+});
+autoUpdater.on('update-not-available', (info) => {
+    updateState = { status: 'current', version: info.version };
+    recordDiagnosticEvent('update-not-available', updateState);
+});
+autoUpdater.on('download-progress', (progress) => {
+    updateState = {
+        status: 'downloading',
+        percent: Math.round(progress.percent || 0),
+        version: updateState.version,
+    };
+});
+autoUpdater.on('update-downloaded', (info) => {
+    updateState = { status: 'downloaded', version: info.version };
+    recordDiagnosticEvent('update-downloaded', updateState);
+});
+autoUpdater.on('error', (err) => {
+    updateState = { status: 'error', message: err.message };
+    recordDiagnosticEvent('update-error', updateState);
+});
+
 // Enable context menu so things like copy and paste work in input fields.
 contextMenu({
     showLookUpSelection: false,
@@ -172,7 +214,7 @@ contextMenu({
     showSaveImage: false,
     showSaveImageAs: false,
     showInspectElement: enableDesktopDiagnostics,
-    showServices: false
+    showServices: false,
 });
 
 // Keep DevTools unavailable in normal packaged builds. They can still be
@@ -180,7 +222,7 @@ contextMenu({
 if (enableDesktopDiagnostics) {
     debug({
         isEnabled: true,
-        showDevTools
+        showDevTools,
     });
 }
 
@@ -217,7 +259,12 @@ let isQuitting = false;
  * screen sharing. Created on demand via IPC from the main renderer.
  */
 let toolbarWindow = null;
+let mediaCheckWindow = null;
 let jitsiScreenShareSourceHandlerRegistered = false;
+let lastFailedMainURL = null;
+let callState = { inMeeting: false, muted: true, sharing: false };
+let chromeCSSKey = null;
+let chromeCSSGeneration = 0;
 
 const MAX_DIAGNOSTIC_EVENTS = 80;
 const diagnosticsEvents = [];
@@ -225,7 +272,7 @@ const permissionState = {
     media: { status: 'unknown' },
     displayCapture: { status: 'unknown' },
     notifications: { status: 'unknown' },
-    openExternal: { status: 'blocked' }
+    openExternal: { status: 'blocked' },
 };
 let lastScreenShareSource = null;
 
@@ -233,8 +280,6 @@ let lastScreenShareSource = null;
  * Add protocol data
  */
 const appProtocolSurplus = `${config.default.appProtocolPrefix}://`;
-let rendererReady = false;
-let protocolDataForFrontApp = null;
 
 function escapeRegExp(value) {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -242,12 +287,9 @@ function escapeRegExp(value) {
 
 function redactLocalPath(value) {
     let text = String(value);
-    const localRoots = [
-        process.env.HOME,
-        process.env.USERPROFILE
-    ].filter(root => root && root.length > 3);
+    const localRoots = [process.env.HOME, process.env.USERPROFILE].filter((root) => root && root.length > 3);
 
-    localRoots.forEach(root => {
+    localRoots.forEach((root) => {
         text = text.replace(new RegExp(escapeRegExp(root), 'g'), '~');
     });
 
@@ -255,8 +297,10 @@ function redactLocalPath(value) {
 }
 
 function redactDiagnosticString(value) {
-    let text = redactLocalPath(value)
-        .replace(/((?:authorization|cookie|password|secret|token)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]');
+    const text = redactLocalPath(value).replace(
+        /((?:authorization|cookie|password|secret|token)\s*[:=]\s*)[^\s,;]+/gi,
+        '$1[redacted]',
+    );
 
     try {
         const url = new URL.URL(text);
@@ -285,19 +329,21 @@ function sanitizeDiagnosticValue(value, depth = 0) {
     }
 
     if (Array.isArray(value)) {
-        return value.slice(0, 20).map(item => sanitizeDiagnosticValue(item, depth + 1));
+        return value.slice(0, 20).map((item) => sanitizeDiagnosticValue(item, depth + 1));
     }
 
     if (typeof value === 'object') {
-        return Object.entries(value).slice(0, 30).reduce((acc, [ key, item ]) => {
-            if (/authorization|cookie|credential|csrf|jwt|password|secret|session|token|xsrf/i.test(key)) {
-                acc[key] = '[redacted]';
-            } else {
-                acc[key] = sanitizeDiagnosticValue(item, depth + 1);
-            }
+        return Object.entries(value)
+            .slice(0, 30)
+            .reduce((acc, [key, item]) => {
+                if (/authorization|cookie|credential|csrf|jwt|password|secret|session|token|xsrf/i.test(key)) {
+                    acc[key] = '[redacted]';
+                } else {
+                    acc[key] = sanitizeDiagnosticValue(item, depth + 1);
+                }
 
-            return acc;
-        }, {});
+                return acc;
+            }, {});
     }
 
     return String(value);
@@ -307,7 +353,7 @@ function recordDiagnosticEvent(type, payload = {}) {
     const event = {
         at: new Date().toISOString(),
         type: String(type || 'event'),
-        payload: sanitizeDiagnosticValue(payload)
+        payload: sanitizeDiagnosticValue(payload),
     };
 
     diagnosticsEvents.push(event);
@@ -318,6 +364,21 @@ function recordDiagnosticEvent(type, payload = {}) {
 
     return event;
 }
+
+const toolbarCommandBroker = createToolbarCommandBroker({
+    sendCommand: (command) => {
+        if (!mainWindow || mainWindow.isDestroyed()) {
+            throw new Error('The meeting window is unavailable.');
+        }
+
+        mainWindow.webContents.send('toolbar:action', command);
+    },
+    isToolbarSender: (event) =>
+        Boolean(toolbarWindow && !toolbarWindow.isDestroyed() && event.sender === toolbarWindow.webContents),
+    isResultSender: (event) =>
+        Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && isTrustedRemoteIpc(event)),
+    recordDiagnostic: (type, payload) => recordDiagnosticEvent(`toolbar-command-${type}`, payload),
+});
 
 function getCurrentURLSummary() {
     if (!mainWindow || mainWindow.isDestroyed()) {
@@ -340,6 +401,111 @@ function getPermissionStatus() {
     return sanitizeDiagnosticValue(permissionState);
 }
 
+function getNativeMediaPermissionStatus() {
+    const permissions = {
+        camera: 'unknown',
+        microphone: 'unknown',
+        screen: 'unknown',
+    };
+
+    if (process.platform === 'darwin') {
+        permissions.camera = normalizePermissionStatus(systemPreferences.getMediaAccessStatus('camera'));
+        permissions.microphone = normalizePermissionStatus(systemPreferences.getMediaAccessStatus('microphone'));
+        permissions.screen = normalizePermissionStatus(systemPreferences.getMediaAccessStatus('screen'));
+    } else {
+        permissions.camera = normalizePermissionStatus(permissionState.media?.status);
+        permissions.microphone = normalizePermissionStatus(permissionState.media?.status);
+        permissions.screen = normalizePermissionStatus(permissionState.displayCapture?.status);
+    }
+
+    return permissions;
+}
+
+function getMediaCapabilities() {
+    const screenShare = getScreenShareCapabilities({
+        platform: process.platform,
+        environment: process.env,
+        permissionStatus: getNativeMediaPermissionStatus().screen,
+    });
+
+    return {
+        bridgeVersion: 3,
+        platform: process.platform,
+        sessionType: isWaylandSession() ? 'wayland' : process.env.XDG_SESSION_TYPE || null,
+        permissions: getNativeMediaPermissionStatus(),
+        screenShare: {
+            ...screenShare,
+            sourceSwitching: true,
+        },
+    };
+}
+
+function notifyMediaStatusChanged() {
+    const status = getMediaCapabilities();
+
+    sendToMainWindow('media:status-changed', status);
+    if (mediaCheckWindow && !mediaCheckWindow.isDestroyed()) {
+        mediaCheckWindow.webContents.send('media-check:status-changed', status);
+    }
+}
+
+async function requestNativeMediaAccess(kind) {
+    if (!['camera', 'microphone'].includes(kind)) {
+        return { granted: false, status: 'unsupported' };
+    }
+
+    let granted = false;
+
+    if (process.platform === 'darwin') {
+        granted = await systemPreferences.askForMediaAccess(kind);
+    } else {
+        const status = getNativeMediaPermissionStatus()[kind];
+
+        granted = !['blocked', 'denied', 'restricted'].includes(status);
+    }
+
+    const result = {
+        granted,
+        status: getNativeMediaPermissionStatus()[kind],
+    };
+
+    recordDiagnosticEvent('media-access-requested', { kind, ...result });
+    notifyMediaStatusChanged();
+
+    return result;
+}
+
+async function openMediaSystemSettings(kind) {
+    const targets = {
+        darwin: {
+            camera: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Camera',
+            microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+            screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+        },
+        win32: {
+            camera: 'ms-settings:privacy-webcam',
+            microphone: 'ms-settings:privacy-microphone',
+            screen: 'ms-settings:privacy-screenshotborders',
+        },
+    };
+    const target = targets[process.platform]?.[kind];
+
+    if (!target) {
+        return { ok: false, reason: 'unsupported' };
+    }
+
+    try {
+        await shell.openExternal(target);
+        recordDiagnosticEvent('media-settings-opened', { kind, platform: process.platform });
+
+        return { ok: true };
+    } catch (err) {
+        recordDiagnosticEvent('media-settings-error', { kind, message: err.message });
+
+        return { ok: false, reason: err.message };
+    }
+}
+
 function getDesktopInfo() {
     return {
         appName: app.name,
@@ -354,7 +520,10 @@ function getDesktopInfo() {
         serverURL: hashMeetServerURL,
         currentURL: getCurrentURLSummary(),
         lastScreenShareSource,
-        permissions: getPermissionStatus()
+        permissions: getPermissionStatus(),
+        mediaCapabilities: getMediaCapabilities(),
+        callState,
+        update: updateState,
     };
 }
 
@@ -362,7 +531,7 @@ function getDiagnosticBundle() {
     return {
         generatedAt: new Date().toISOString(),
         desktop: getDesktopInfo(),
-        events: diagnosticsEvents.slice()
+        events: diagnosticsEvents.slice(),
     };
 }
 
@@ -374,7 +543,7 @@ function copyDiagnosticsToClipboard() {
 
     return {
         ok: true,
-        eventCount: diagnosticsEvents.length
+        eventCount: diagnosticsEvents.length,
     };
 }
 
@@ -389,13 +558,13 @@ function updatePermissionState(permission, status, details = {}) {
         'display-capture': 'displayCapture',
         media: 'media',
         notifications: 'notifications',
-        openExternal: 'openExternal'
+        openExternal: 'openExternal',
     };
     const key = keyMap[permission] || permission;
     const snapshot = {
         status,
         permission,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
     };
 
     if (details && typeof details === 'object') {
@@ -406,7 +575,7 @@ function updatePermissionState(permission, status, details = {}) {
     recordDiagnosticEvent('permission-request', {
         permission,
         status,
-        details: snapshot
+        details: snapshot,
     });
 
     return permissionState[key];
@@ -420,23 +589,23 @@ function buildSourceInfo(source) {
     return {
         id: source.id,
         name: source.name,
-        type: source.id.startsWith('screen:') ? 'screen' : 'window'
+        type: source.id.startsWith('screen:') ? 'screen' : 'window',
+        displayId: source.display_id || null,
     };
 }
 
 function isWaylandSession() {
-    return process.platform === 'linux'
-        && (
-            String(process.env.XDG_SESSION_TYPE || '').toLowerCase() === 'wayland'
-            || Boolean(process.env.WAYLAND_DISPLAY)
-        );
+    return (
+        process.platform === 'linux' &&
+        (String(process.env.XDG_SESSION_TYPE || '').toLowerCase() === 'wayland' || Boolean(process.env.WAYLAND_DISPLAY))
+    );
 }
 
 function displayMediaRequestHandlerOptions() {
     return {
         // Electron only supports the explicit system picker option on macOS.
         // Linux Wayland reaches the PipeWire portal through desktopCapturer.
-        useSystemPicker: process.platform === 'darwin'
+        useSystemPicker: process.platform === 'darwin',
     };
 }
 
@@ -445,23 +614,18 @@ function shouldUseOpaqueToolbarWindow() {
 }
 
 function attachToolbarWindowDiagnostics(targetWindow) {
-    const record = (type, payload = {}) => recordDiagnosticEvent(`toolbar-window-${type}`, {
-        ...payload,
-        wayland: isWaylandSession()
-    });
+    const record = (type, payload = {}) =>
+        recordDiagnosticEvent(`toolbar-window-${type}`, {
+            ...payload,
+            wayland: isWaylandSession(),
+        });
 
-    targetWindow.webContents.on('did-fail-load', (
-            _event,
-            errorCode,
-            errorDescription,
-            validatedURL,
-            isMainFrame
-    ) => {
+    targetWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
         record('did-fail-load', {
             errorCode,
             errorDescription,
             validatedURL,
-            isMainFrame
+            isMainFrame,
         });
     });
 
@@ -482,14 +646,15 @@ function attachToolbarWindowDiagnostics(targetWindow) {
             level,
             message,
             line,
-            sourceId
+            sourceId,
         });
     });
 }
 
-function grantScreenShareSource(source, callback, origin = 'custom-picker') {
+function grantScreenShareSource(source, callback, origin = 'custom-picker', options = {}) {
     if (!source) {
         recordDiagnosticEvent('screen-share-source-cancelled', { origin });
+        sendToMainWindow('desktop:screen-source-selected', null);
         callback(null);
 
         return;
@@ -500,15 +665,22 @@ function grantScreenShareSource(source, callback, origin = 'custom-picker') {
         origin,
         sourceName: lastScreenShareSource.name,
         sourceType: lastScreenShareSource.type,
-        wayland: isWaylandSession()
+        wayland: isWaylandSession(),
     });
     recordDiagnosticEvent('screen-share-source-selected', {
         ...lastScreenShareSource,
         origin,
-        wayland: isWaylandSession()
+        wayland: isWaylandSession(),
     });
     sendToMainWindow('desktop:screen-source-selected', lastScreenShareSource);
-    callback({ video: source });
+    callback(
+        createDisplayMediaGrant({
+            source,
+            platform: process.platform,
+            audioRequested: options.audioRequested,
+            shareSystemAudio: options.shareSystemAudio,
+        }),
+    );
 }
 
 function setupJitsiScreenShareSourceHandler() {
@@ -519,14 +691,14 @@ function setupJitsiScreenShareSourceHandler() {
     ipcMain.handle(JITSI_SCREEN_SHARE_GET_SOURCES, (_event, options = {}) => {
         const sourceOptions = {
             ...options,
-            types: options.types || [ 'screen', 'window' ],
+            types: options.types || ['screen', 'window'],
             thumbnailSize: options.thumbnailSize || { width: 320, height: 200 },
-            fetchWindowIcons: options.fetchWindowIcons === true
+            fetchWindowIcons: options.fetchWindowIcons === true,
         };
 
         recordDiagnosticEvent('screen-share-source-list-requested', {
             types: sourceOptions.types,
-            thumbnailSize: sourceOptions.thumbnailSize
+            thumbnailSize: sourceOptions.thumbnailSize,
         });
 
         return desktopCapturer.getSources(sourceOptions);
@@ -534,7 +706,6 @@ function setupJitsiScreenShareSourceHandler() {
 
     jitsiScreenShareSourceHandlerRegistered = true;
 }
-
 
 /**
  * Builds and installs the application menu. On macOS this shows as the
@@ -552,45 +723,61 @@ function setApplicationMenu() {
         click: () => {
             isQuitting = true;
             app.quit();
-        }
+        },
     };
 
     const template = [
-        ...(isMac ? [ {
-            label: app.name,
-            submenu: [
-                { role: 'about' },
-                { type: 'separator' },
-                { role: 'services' },
-                { type: 'separator' },
-                { role: 'hide' },
-                { role: 'hideOthers' },
-                { role: 'unhide' },
-                { type: 'separator' },
-                quitItem
-            ]
-        } ] : []),
+        ...(isMac
+            ? [
+                  {
+                      label: app.name,
+                      submenu: [
+                          { role: 'about' },
+                          { type: 'separator' },
+                          { role: 'services' },
+                          { type: 'separator' },
+                          { role: 'hide' },
+                          { role: 'hideOthers' },
+                          { role: 'unhide' },
+                          { type: 'separator' },
+                          quitItem,
+                      ],
+                  },
+              ]
+            : []),
         {
             label: 'File',
             submenu: [
                 {
                     label: 'Home',
                     accelerator: 'CmdOrCtrl+Shift+H',
-                    click: () => { if (mainWindow) mainWindow.loadURL(homeURL); }
+                    click: () => {
+                        if (mainWindow) {
+                            mainWindow.loadURL(homeURL);
+                        }
+                    },
                 },
                 { type: 'separator' },
                 {
                     label: 'Reload',
                     accelerator: 'CmdOrCtrl+R',
-                    click: () => { if (mainWindow) mainWindow.reload(); }
+                    click: () => {
+                        if (mainWindow) {
+                            mainWindow.reload();
+                        }
+                    },
                 },
                 {
                     label: 'Force Reload',
                     accelerator: 'CmdOrCtrl+Shift+R',
-                    click: () => { if (mainWindow) mainWindow.webContents.reloadIgnoringCache(); }
+                    click: () => {
+                        if (mainWindow) {
+                            mainWindow.webContents.reloadIgnoringCache();
+                        }
+                    },
                 },
-                ...(isMac ? [] : [ { type: 'separator' }, quitItem ])
-            ]
+                ...(isMac ? [] : [{ type: 'separator' }, quitItem]),
+            ],
         },
         {
             label: 'Edit',
@@ -601,8 +788,8 @@ function setApplicationMenu() {
                 { role: 'cut' },
                 { role: 'copy' },
                 { role: 'paste' },
-                { role: 'selectAll' }
-            ]
+                { role: 'selectAll' },
+            ],
         },
         {
             label: 'View',
@@ -611,52 +798,85 @@ function setApplicationMenu() {
                 { role: 'zoomIn' },
                 { role: 'zoomOut' },
                 { role: 'togglefullscreen' },
-                ...(enableDesktopDiagnostics ? [
-                    { type: 'separator' },
-                    {
-                        label: 'Toggle Developer Tools',
-                        accelerator: isMac ? 'Alt+Cmd+I' : 'Ctrl+Shift+I',
-                        click: () => { if (mainWindow) mainWindow.webContents.toggleDevTools(); }
-                    }
-                ] : [])
-            ]
+                ...(enableDesktopDiagnostics
+                    ? [
+                          { type: 'separator' },
+                          {
+                              label: 'Toggle Developer Tools',
+                              accelerator: isMac ? 'Alt+Cmd+I' : 'Ctrl+Shift+I',
+                              click: () => {
+                                  if (mainWindow) {
+                                      mainWindow.webContents.toggleDevTools();
+                                  }
+                              },
+                          },
+                      ]
+                    : []),
+            ],
         },
         {
             label: 'Window',
             submenu: [
                 { role: 'minimize' },
                 ...(isMac
-                    ? [ { type: 'separator' }, { role: 'front' } ]
-                    : [ {
-                        label: 'Hide to Tray',
-                        accelerator: 'Ctrl+W',
-                        click: () => { if (mainWindow) mainWindow.hide(); }
-                    } ])
-            ]
+                    ? [{ type: 'separator' }, { role: 'front' }]
+                    : [
+                          {
+                              label: 'Hide to Tray',
+                              accelerator: 'Ctrl+W',
+                              click: () => {
+                                  if (mainWindow) {
+                                      mainWindow.hide();
+                                  }
+                              },
+                          },
+                      ]),
+            ],
         },
         {
             label: 'Help',
             submenu: [
                 {
+                    label: 'Audio & Video Setup',
+                    accelerator: 'CmdOrCtrl+Shift+A',
+                    click: () => createMediaCheckWindow(),
+                },
+                {
+                    label: 'Check for Updates',
+                    enabled: app.isPackaged && !process.mas,
+                    click: () => {
+                        updateState = { status: 'checking', checkedAt: new Date().toISOString() };
+                        autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+                            updateState = { status: 'error', message: err.message };
+                            recordDiagnosticEvent('update-error', updateState);
+                        });
+                    },
+                },
+                { type: 'separator' },
+                {
                     label: 'Copy Diagnostics',
                     accelerator: 'CmdOrCtrl+Shift+D',
-                    click: () => copyDiagnosticsToClipboard()
+                    click: () => copyDiagnosticsToClipboard(),
                 },
-                ...(enableDesktopDiagnostics ? [ {
-                    label: 'Open WebRTC Internals',
-                    click: () => createWebRTCInternalsWindow()
-                } ] : []),
+                ...(enableDesktopDiagnostics
+                    ? [
+                          {
+                              label: 'Open WebRTC Internals',
+                              click: () => createWebRTCInternalsWindow(),
+                          },
+                      ]
+                    : []),
                 { type: 'separator' },
                 {
                     label: 'Report an Issue',
-                    click: () => shell.openExternal('https://github.com/HashMicro/hashmeet-desktop/issues')
+                    click: () => shell.openExternal('https://github.com/HashMicro/hashmeet-desktop/issues'),
                 },
                 {
                     label: 'HashMicro Website',
-                    click: () => shell.openExternal('https://hashmicro.com')
-                }
-            ]
-        }
+                    click: () => shell.openExternal('https://hashmicro.com'),
+                },
+            ],
+        },
     ];
 
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -667,93 +887,106 @@ function setApplicationMenu() {
  * Clicking the tray icon toggles window visibility.
  */
 function createTray() {
-    if (tray) return;
+    if (tray) {
+        return;
+    }
 
     const iconPath = resolveAppAssetPath('resources', 'tray-icon.png');
+
     try {
         tray = new Tray(iconPath);
     } catch (err) {
         console.warn('[tray] Could not create system tray icon:', err.message);
+
         return;
     }
     tray.setToolTip('HashMeet');
-    tray.setContextMenu(Menu.buildFromTemplate([
-        {
-            label: 'Show HashMeet',
-            click: () => {
-                if (mainWindow) {
-                    if (mainWindow.isMinimized()) mainWindow.restore();
-                    mainWindow.show();
-                    mainWindow.focus();
-                }
-            }
-        },
-        { type: 'separator' },
-        {
-            label: 'Quit',
-            click: () => {
-                isQuitting = true;
-                app.quit();
-            }
-        }
-    ]));
+    tray.setContextMenu(
+        Menu.buildFromTemplate([
+            {
+                label: 'Show HashMeet',
+                click: () => {
+                    if (mainWindow) {
+                        if (mainWindow.isMinimized()) {
+                            mainWindow.restore();
+                        }
+                        mainWindow.show();
+                        mainWindow.focus();
+                    }
+                },
+            },
+            {
+                label: 'Audio & Video Setup',
+                click: () => createMediaCheckWindow(),
+            },
+            { type: 'separator' },
+            {
+                label: 'Quit',
+                click: () => {
+                    isQuitting = true;
+                    app.quit();
+                },
+            },
+        ]),
+    );
 
     tray.on('click', () => {
-        if (!mainWindow) return;
+        if (!mainWindow) {
+            return;
+        }
         if (mainWindow.isVisible() && !mainWindow.isMinimized()) {
             mainWindow.hide();
         } else {
-            if (mainWindow.isMinimized()) mainWindow.restore();
+            if (mainWindow.isMinimized()) {
+                mainWindow.restore();
+            }
             mainWindow.show();
             mainWindow.focus();
         }
     });
 }
 
-/**
- * CSS injected on every page load to push webapp content below the
- * custom title bar area. On non-macOS platforms we also render a
- * draggable dark strip behind the titleBarOverlay buttons so the window can be moved.
- * macOS uses titleBarStyle 'hiddenInset' so drag is native — only
- * padding is needed to keep content clear of the traffic lights.
- */
-function getChromeCSS() {
-    if (process.platform === 'darwin') {
-        return `
-            :root { --hashmeet-desktop-chrome-height: 28px; }
-            body {
-                padding-top: var(--hashmeet-desktop-chrome-height) !important;
-                -webkit-app-region: drag;
-            }
-            body > * { -webkit-app-region: no-drag; }
-            #jitsi-container.header-hidden {
-                top: var(--hashmeet-desktop-chrome-height) !important;
-                height: calc(100vh - var(--hashmeet-desktop-chrome-height)) !important;
-                height: calc(100dvh - var(--hashmeet-desktop-chrome-height)) !important;
-            }
-        `;
+async function refreshChromeCSS(targetWindow) {
+    if (!targetWindow || targetWindow.isDestroyed()) {
+        return;
     }
 
-    return `
-        :root { --hashmeet-desktop-chrome-height: 36px; }
-        body {
-            padding-top: var(--hashmeet-desktop-chrome-height) !important;
-            -webkit-app-region: drag;
-        }
-        body > * { -webkit-app-region: no-drag; }
-        body > header.navbar,
-        body header.navbar,
-        .navbar.fixed-top,
-        .navbar.sticky-top {
-            box-sizing: border-box !important;
-            padding-right: 144px !important;
-        }
-        #jitsi-container.header-hidden {
-            top: var(--hashmeet-desktop-chrome-height) !important;
-            height: calc(100vh - var(--hashmeet-desktop-chrome-height)) !important;
-            height: calc(100dvh - var(--hashmeet-desktop-chrome-height)) !important;
-        }
-    `;
+    const generation = ++chromeCSSGeneration;
+    const previousKey = chromeCSSKey;
+
+    chromeCSSKey = null;
+    if (previousKey) {
+        await targetWindow.webContents.removeInsertedCSS(previousKey).catch(() => {});
+    }
+
+    if (targetWindow.isDestroyed() || generation !== chromeCSSGeneration) {
+        return;
+    }
+
+    const layout = getChromeLayout(process.platform, targetWindow.isFullScreen());
+    const insertedKey = await targetWindow.webContents
+        .insertCSS(layout.css, CHROME_CSS_INSERT_OPTIONS)
+        .catch((err) => {
+            recordDiagnosticEvent('chrome-css-injection-error', { message: err.message });
+
+            return null;
+        });
+
+    if (!insertedKey) {
+        return;
+    }
+
+    if (targetWindow.isDestroyed() || generation !== chromeCSSGeneration) {
+        await targetWindow.webContents.removeInsertedCSS(insertedKey).catch(() => {});
+
+        return;
+    }
+
+    chromeCSSKey = insertedKey;
+    recordDiagnosticEvent('chrome-layout-applied', {
+        fullscreen: targetWindow.isFullScreen(),
+        ...layout.metrics,
+    });
 }
 
 /**
@@ -768,10 +1001,19 @@ function getChromeCSS() {
 function setupScreenShareHandler(window) {
     window.webContents.session.setDisplayMediaRequestHandler(async (request, callback) => {
         try {
+            if (!getTrustedOriginPolicy().allows(request.securityOrigin)) {
+                recordDiagnosticEvent('screen-share-origin-rejected', {
+                    securityOrigin: request.securityOrigin,
+                });
+                grantScreenShareSource(null, callback, 'untrusted-origin');
+
+                return;
+            }
+
             const sourceOptions = {
-                types: [ 'screen', 'window' ],
+                types: ['screen', 'window'],
                 thumbnailSize: { width: 320, height: 200 },
-                fetchWindowIcons: false
+                fetchWindowIcons: true,
             };
             const sources = await desktopCapturer.getSources(sourceOptions);
 
@@ -782,10 +1024,11 @@ function setupScreenShareHandler(window) {
                         audioRequested: request.audioRequested,
                         videoRequested: request.videoRequested,
                         securityOrigin: request.securityOrigin,
-                        userGesture: request.userGesture
-                    }
+                        userGesture: request.userGesture,
+                    },
                 });
-                callback(null);
+                grantScreenShareSource(null, callback, isWaylandSession() ? 'wayland-pipewire' : 'no-sources');
+
                 return;
             }
 
@@ -814,57 +1057,119 @@ function setupScreenShareHandler(window) {
                 backgroundColor: '#1a1a1a',
                 autoHideMenuBar: true,
                 webPreferences: {
-                    contextIsolation: false,
-                    nodeIntegration: true,
-                    sandbox: false
-                }
+                    contextIsolation: true,
+                    nodeIntegration: false,
+                    sandbox: true,
+                    preload: resolveAppAssetPath('picker', 'preload.js'),
+                },
             });
 
             picker.setMenuBarVisibility(false);
             picker.loadFile(resolveAppAssetPath('picker', 'picker.html'));
 
-            const sourcesById = new Map();
-            sources.forEach(s => sourcesById.set(s.id, s));
+            let currentSources = sources;
+            let sourcesById = new Map(currentSources.map((source) => [source.id, source]));
+            let refreshInFlight = false;
 
-            const payload = sources.map(s => ({
-                id: s.id,
-                name: s.name,
-                type: s.id.startsWith('screen:') ? 'screen' : 'window',
-                thumbnail: s.thumbnail.toDataURL()
-            }));
+            const buildPickerPayload = () => {
+                return {
+                    sources: currentSources.map((source) => {
+                        return {
+                            id: source.id,
+                            name: source.name,
+                            type: source.id.startsWith('screen:') ? 'screen' : 'window',
+                            displayId: source.display_id || null,
+                            thumbnail: source.thumbnail.toDataURL(),
+                            appIcon: source.appIcon ? source.appIcon.toDataURL() : null,
+                        };
+                    }),
+                    capabilities: {
+                        systemAudio: process.platform === 'win32' && request.audioRequested,
+                        systemAudioPlatformSupported: process.platform === 'win32',
+                    },
+                    request: {
+                        audioRequested: request.audioRequested,
+                        videoRequested: request.videoRequested,
+                    },
+                };
+            };
+
+            const sendSources = () => {
+                if (!picker.isDestroyed()) {
+                    picker.webContents.send('sources', buildPickerPayload());
+                }
+            };
+
+            const refreshSources = async () => {
+                if (refreshInFlight || picker.isDestroyed()) {
+                    return;
+                }
+                refreshInFlight = true;
+                try {
+                    currentSources = await desktopCapturer.getSources(sourceOptions);
+                    sourcesById = new Map(currentSources.map((source) => [source.id, source]));
+                    sendSources();
+                } catch (err) {
+                    recordDiagnosticEvent('screen-share-source-refresh-error', { message: err.message });
+                    if (!picker.isDestroyed()) {
+                        picker.webContents.send('sources:error', { message: 'Could not refresh share sources.' });
+                    }
+                } finally {
+                    refreshInFlight = false;
+                }
+            };
 
             picker.webContents.once('did-finish-load', () => {
-                picker.webContents.send('sources', payload);
+                sendSources();
                 picker.show();
             });
 
             let settled = false;
-            const finish = (sourceId) => {
-                if (settled) return;
+            const finish = (selection) => {
+                if (settled) {
+                    return;
+                }
                 settled = true;
+                const sourceId = typeof selection === 'object' && selection ? selection.sourceId : selection;
                 const source = sourceId ? sourcesById.get(sourceId) : null;
 
-                grantScreenShareSource(source, callback, 'custom-picker');
+                grantScreenShareSource(source, callback, 'custom-picker', {
+                    audioRequested: request.audioRequested,
+                    shareSystemAudio: Boolean(selection?.shareSystemAudio),
+                });
 
                 if (!picker.isDestroyed()) {
                     picker.close();
                 }
             };
 
-            const onSelect = (_ev, sourceId) => finish(sourceId);
-            ipcMain.once('picker:select', onSelect);
+            const fromPicker = (event) => event.sender === picker.webContents;
+            const onSelect = (event, selection) => {
+                if (fromPicker(event)) {
+                    finish(selection);
+                }
+            };
+            const onRefresh = (event) => {
+                if (fromPicker(event)) {
+                    refreshSources();
+                }
+            };
+
+            ipcMain.on('picker:select', onSelect);
+            ipcMain.on('picker:refresh', onRefresh);
 
             picker.on('closed', () => {
                 ipcMain.removeListener('picker:select', onSelect);
+                ipcMain.removeListener('picker:refresh', onRefresh);
                 finish(null);
             });
         } catch (err) {
             console.error('[screenshare] handler error:', err);
             recordDiagnosticEvent('screen-share-handler-error', {
                 message: err.message,
-                stack: err.stack
+                stack: err.stack,
             });
-            callback(null);
+            grantScreenShareSource(null, callback, 'handler-error');
         }
     }, displayMediaRequestHandlerOptions());
 }
@@ -886,14 +1191,17 @@ function createToolbarWindow(initialState) {
         return;
     }
 
-    const { workArea } = screen.getPrimaryDisplay();
+    const sharedDisplay = lastScreenShareSource?.displayId
+        ? screen.getAllDisplays().find((display) => String(display.id) === String(lastScreenShareSource.displayId))
+        : null;
+    const { workArea } = sharedDisplay || screen.getPrimaryDisplay();
     const TOOLBAR_WIDTH = Math.min(680, Math.max(560, workArea.width - 48));
     const TOOLBAR_HEIGHT = 104;
     const MARGIN_BOTTOM = 40;
     const opaqueToolbarWindow = shouldUseOpaqueToolbarWindow();
 
-    const x = Math.round(workArea.x + ((workArea.width - TOOLBAR_WIDTH) / 2));
-    const y = Math.round((workArea.y + workArea.height) - TOOLBAR_HEIGHT - MARGIN_BOTTOM);
+    const x = Math.round(workArea.x + (workArea.width - TOOLBAR_WIDTH) / 2);
+    const y = Math.round(workArea.y + workArea.height - TOOLBAR_HEIGHT - MARGIN_BOTTOM);
 
     toolbarWindow = new BrowserWindow({
         width: TOOLBAR_WIDTH,
@@ -916,11 +1224,12 @@ function createToolbarWindow(initialState) {
         show: false,
         title: 'HashMeet Screen Share',
         webPreferences: {
-            contextIsolation: false,
-            nodeIntegration: true,
-            sandbox: false,
-            backgroundThrottling: false
-        }
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            preload: resolveAppAssetPath('toolbar', 'preload.js'),
+            backgroundThrottling: false,
+        },
     });
 
     attachToolbarWindowDiagnostics(toolbarWindow);
@@ -928,9 +1237,10 @@ function createToolbarWindow(initialState) {
         opaque: opaqueToolbarWindow,
         focusable: opaqueToolbarWindow,
         wayland: isWaylandSession(),
-        bounds: { x, y, width: TOOLBAR_WIDTH, height: TOOLBAR_HEIGHT }
+        bounds: { x, y, width: TOOLBAR_WIDTH, height: TOOLBAR_HEIGHT },
     });
     toolbarWindow.setAlwaysOnTop(true, 'screen-saver');
+    toolbarWindow.setContentProtection(true);
     toolbarWindow.setMenuBarVisibility(false);
     if (process.platform === 'darwin') {
         toolbarWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
@@ -940,7 +1250,7 @@ function createToolbarWindow(initialState) {
 
     recordDiagnosticEvent('toolbar-window-load-file', {
         path: toolbarPath,
-        exists: fs.existsSync(toolbarPath)
+        exists: fs.existsSync(toolbarPath),
     });
     toolbarWindow.loadFile(toolbarPath);
 
@@ -950,13 +1260,14 @@ function createToolbarWindow(initialState) {
         }
         recordDiagnosticEvent('toolbar-window-loaded', {
             wayland: isWaylandSession(),
-            visible: toolbarWindow.isVisible()
+            visible: toolbarWindow.isVisible(),
         });
         toolbarWindow.webContents.send('toolbar:init', initialState || {});
         toolbarWindow.showInactive();
     });
 
     toolbarWindow.on('closed', () => {
+        toolbarCommandBroker.cancelAll();
         toolbarWindow = null;
     });
 }
@@ -965,10 +1276,50 @@ function createToolbarWindow(initialState) {
  * Destroy the floating toolbar window if it's open.
  */
 function closeToolbarWindow() {
+    toolbarCommandBroker.cancelAll();
     if (toolbarWindow && !toolbarWindow.isDestroyed()) {
         toolbarWindow.close();
     }
     toolbarWindow = null;
+}
+
+function createMediaCheckWindow() {
+    if (mediaCheckWindow && !mediaCheckWindow.isDestroyed()) {
+        mediaCheckWindow.show();
+        mediaCheckWindow.focus();
+        notifyMediaStatusChanged();
+
+        return;
+    }
+
+    mediaCheckWindow = new BrowserWindow({
+        width: 920,
+        height: 720,
+        minWidth: 760,
+        minHeight: 600,
+        show: false,
+        title: 'HashMeet Audio & Video Setup',
+        backgroundColor: '#171717',
+        autoHideMenuBar: true,
+        webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            preload: resolveAppAssetPath('media-check', 'preload.js'),
+        },
+    });
+    mediaCheckWindow.setMenuBarVisibility(false);
+    mediaCheckWindow.loadFile(resolveAppAssetPath('media-check', 'media-check.html'));
+    mediaCheckWindow.webContents.once('did-finish-load', () => {
+        if (mediaCheckWindow && !mediaCheckWindow.isDestroyed()) {
+            mediaCheckWindow.webContents.send('media-check:status-changed', getMediaCapabilities());
+            mediaCheckWindow.show();
+        }
+    });
+    mediaCheckWindow.on('closed', () => {
+        mediaCheckWindow = null;
+    });
+    recordDiagnosticEvent('media-check-opened');
 }
 
 /**
@@ -979,7 +1330,7 @@ function createJitsiMeetWindow() {
     setApplicationMenu();
 
     // Check for Updates.
-    if (!process.mas) {
+    if (app.isPackaged && !process.mas) {
         autoUpdater.checkForUpdatesAndNotify();
     }
 
@@ -987,7 +1338,7 @@ function createJitsiMeetWindow() {
     const windowState = windowStateKeeper({
         defaultWidth: 800,
         defaultHeight: 600,
-        fullScreen: false
+        fullScreen: false,
     });
 
     // HashMeet desktop loads the live Laravel webapp directly. The upstream
@@ -1007,26 +1358,29 @@ function createJitsiMeetWindow() {
         show: false,
         backgroundColor: '#1a1a1a',
         title: 'HashMeet',
+
         // Hide the native title bar but keep native window controls.
         // macOS: traffic lights overlay the page at top-left.
         // Windows: min/max/close buttons shown as a titleBarOverlay
         //          in the top-right corner.
         titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
         ...(isMac ? { trafficLightPosition: { x: 16, y: 10 } } : {}),
-        ...(isMac ? {} : {
-            titleBarOverlay: {
-                color: '#1a1a1a',
-                symbolColor: '#ffffff',
-                height: 36
-            }
-        }),
+        ...(isMac
+            ? {}
+            : {
+                  titleBarOverlay: {
+                      color: '#1a1a1a',
+                      symbolColor: '#ffffff',
+                      height: 36,
+                  },
+              }),
         webPreferences: {
             enableBlinkFeatures: 'WebAssemblyCSP',
             contextIsolation: false,
             nodeIntegration: false,
             preload: resolveAppAssetPath('build', 'preload.js'),
-            sandbox: false
-        }
+            sandbox: false,
+        },
     };
 
     const windowOpenHandler = ({ url, frameName }) => {
@@ -1048,6 +1402,50 @@ function createJitsiMeetWindow() {
     mainWindow = new BrowserWindow(options);
     windowState.manage(mainWindow);
     console.log(`[config] Loading HashMeet web app from ${indexURL}`);
+    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+        if (!isMainFrame || errorCode === -3 || !mainWindow || mainWindow.isDestroyed()) {
+            return;
+        }
+
+        const failedOrigin = normalizeWebOrigin(validatedURL);
+
+        if (!failedOrigin) {
+            return;
+        }
+
+        lastFailedMainURL = validatedURL || indexURL;
+        recordDiagnosticEvent('main-window-load-failed', {
+            errorCode,
+            errorDescription,
+            url: validatedURL,
+        });
+        mainWindow.loadFile(resolveAppAssetPath('offline', 'offline.html'));
+    });
+    mainWindow.webContents.on('did-frame-navigate', (_event, url, _code, _status, isMainFrame) => {
+        const origin = normalizeWebOrigin(url);
+
+        if (!origin) {
+            return;
+        }
+
+        if (isMainFrame) {
+            if (getTrustedOriginPolicy().allows(origin)) {
+                lastFailedMainURL = null;
+            }
+        } else {
+            const mainOrigin = normalizeWebOrigin(mainWindow.webContents.getURL());
+
+            if (mainOrigin && getTrustedOriginPolicy().allows(mainOrigin)) {
+                trustedWebOrigins.add(origin);
+            }
+        }
+    });
+    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+        recordDiagnosticEvent('main-render-process-gone', details || {});
+    });
+    mainWindow.webContents.on('unresponsive', () => {
+        recordDiagnosticEvent('main-window-unresponsive');
+    });
     mainWindow.loadURL(indexURL);
 
     if (isDev) {
@@ -1056,14 +1454,14 @@ function createJitsiMeetWindow() {
 
     // Block access to file:// URLs.
     const fileFilter = {
-        urls: [ 'file://*' ]
+        urls: ['file://*'],
     };
 
     const allowedFileRoots = getAllowedFileRoots();
 
     mainWindow.webContents.session.webRequest.onBeforeSendHeaders(fileFilter, (details, callback) => {
         const requestedPath = path.resolve(URL.fileURLToPath(details.url));
-        const isAllowedPath = allowedFileRoots.some(root => isPathInside(root, requestedPath));
+        const isAllowedPath = allowedFileRoots.some((root) => isPathInside(root, requestedPath));
 
         if (!isAllowedPath) {
             callback({ cancel: true });
@@ -1083,33 +1481,28 @@ function createJitsiMeetWindow() {
         if (details.responseHeaders['content-security-policy']) {
             const cspFiltered = details.responseHeaders['content-security-policy'][0]
                 .split(';')
-                .filter(x => x.indexOf('frame-ancestors') === -1)
+                .filter((x) => x.indexOf('frame-ancestors') === -1)
                 .join(';');
 
-            details.responseHeaders['content-security-policy'] = [ cspFiltered ];
+            details.responseHeaders['content-security-policy'] = [cspFiltered];
         }
 
         if (details.responseHeaders['Content-Security-Policy']) {
             const cspFiltered = details.responseHeaders['Content-Security-Policy'][0]
                 .split(';')
-                .filter(x => x.indexOf('frame-ancestors') === -1)
+                .filter((x) => x.indexOf('frame-ancestors') === -1)
                 .join(';');
 
-            details.responseHeaders['Content-Security-Policy'] = [ cspFiltered ];
+            details.responseHeaders['Content-Security-Policy'] = [cspFiltered];
         }
 
         callback({
-            responseHeaders: details.responseHeaders
+            responseHeaders: details.responseHeaders,
         });
     });
 
     // Block redirects.
-    const allowedRedirects = [
-        'http:',
-        'https:',
-        'ws:',
-        'wss:'
-    ];
+    const allowedRedirects = ['http:', 'https:', 'ws:', 'wss:'];
 
     mainWindow.webContents.addListener('will-redirect', (ev, url) => {
         const requestedUrl = new URL.URL(url);
@@ -1120,21 +1513,36 @@ function createJitsiMeetWindow() {
         }
     });
 
-    mainWindow.webContents.session.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details) => {
-        const allowed = permission !== 'openExternal';
+    mainWindow.webContents.session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+        const localMediaCheck =
+            mediaCheckWindow && !mediaCheckWindow.isDestroyed() && webContents === mediaCheckWindow.webContents;
+        const allowedOrigin = localMediaCheck || getTrustedOriginPolicy().allows(requestingOrigin);
+        const allowed = permission !== 'openExternal' && allowedOrigin;
 
         updatePermissionState(permission, allowed ? 'allowed-check' : 'blocked-check', {
             ...(details || {}),
-            requestingOrigin
+            requestingOrigin,
         });
 
         return allowed;
     });
 
     // Block opening any external applications.
-    mainWindow.webContents.session.setPermissionRequestHandler((_, permission, callback, details) => {
+    mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback, details) => {
         if (permission === 'openExternal') {
             console.warn(`Disallowing opening ${details?.externalURL || 'external URL'}`);
+            updatePermissionState(permission, 'blocked', details);
+            callback(false);
+
+            return;
+        }
+
+        const localMediaCheck =
+            mediaCheckWindow && !mediaCheckWindow.isDestroyed() && webContents === mediaCheckWindow.webContents;
+        const requestingOrigin = details?.requestingOrigin || details?.securityOrigin;
+        const allowed = localMediaCheck || getTrustedOriginPolicy().allows(requestingOrigin);
+
+        if (!allowed) {
             updatePermissionState(permission, 'blocked', details);
             callback(false);
 
@@ -1164,6 +1572,8 @@ function createJitsiMeetWindow() {
     });
 
     mainWindow.on('closed', () => {
+        chromeCSSGeneration += 1;
+        chromeCSSKey = null;
         mainWindow = null;
         closeToolbarWindow();
     });
@@ -1181,17 +1591,13 @@ function createJitsiMeetWindow() {
         mainWindow.show();
     });
 
-    // Inject chrome CSS (padding + drag strip) on every page load so custom
-    // title bar works across navigations inside the Laravel webapp.
-    const injectChromeCSS = () => {
-        const css = getChromeCSS();
-        if (css) {
-            mainWindow.webContents.insertCSS(css).catch(() => { /* ignore */ });
-        }
-    };
+    // Keep one platform-aware chrome stylesheet active for the current main
+    // document. Fullscreen removes the reserved overlay area entirely.
+    const syncChromeLayout = () => refreshChromeCSS(mainWindow);
 
-    mainWindow.webContents.on('did-finish-load', injectChromeCSS);
-    mainWindow.webContents.on('did-frame-finish-load', injectChromeCSS);
+    mainWindow.webContents.on('did-finish-load', syncChromeLayout);
+    mainWindow.on('enter-full-screen', syncChromeLayout);
+    mainWindow.on('leave-full-screen', syncChromeLayout);
 
     // Create the tray icon once the main window exists.
     createTray();
@@ -1211,7 +1617,7 @@ function createWebRTCInternalsWindow() {
     const options = {
         minWidth: 800,
         minHeight: 600,
-        show: true
+        show: true,
     };
 
     webrtcInternalsWindow = new BrowserWindow(options);
@@ -1227,10 +1633,7 @@ function getSupportedProtocolRoute(fullProtocolCall) {
             return null;
         }
 
-        const segments = [
-            parsed.hostname,
-            ...parsed.pathname.split('/')
-        ].filter(Boolean);
+        const segments = [parsed.hostname, ...parsed.pathname.split('/')].filter(Boolean);
 
         if (!segments.length) {
             return '';
@@ -1249,7 +1652,7 @@ function getSupportedProtocolRoute(fullProtocolCall) {
         return `meeting/${encodeURIComponent(meetingId)}`;
     } catch (err) {
         recordDiagnosticEvent('protocol-link-parse-error', {
-            message: err.message
+            message: err.message,
         });
 
         return null;
@@ -1261,11 +1664,7 @@ function getSupportedProtocolRoute(fullProtocolCall) {
  * the corresponding meet.hashmicro.com URL.
  */
 function handleProtocolCall(fullProtocolCall) {
-    if (
-        !fullProtocolCall
-        || fullProtocolCall.trim() === ''
-        || fullProtocolCall.indexOf(appProtocolSurplus) !== 0
-    ) {
+    if (!fullProtocolCall || fullProtocolCall.trim() === '' || fullProtocolCall.indexOf(appProtocolSurplus) !== 0) {
         return;
     }
 
@@ -1274,7 +1673,7 @@ function handleProtocolCall(fullProtocolCall) {
     if (route === null) {
         console.warn(`Rejected unsupported protocol URL: ${redactDiagnosticString(fullProtocolCall)}`);
         recordDiagnosticEvent('protocol-link-rejected', {
-            url: fullProtocolCall
+            url: fullProtocolCall,
         });
 
         return;
@@ -1288,7 +1687,7 @@ function handleProtocolCall(fullProtocolCall) {
 
     if (mainWindow) {
         recordDiagnosticEvent('protocol-link-opened', {
-            route: route || 'home'
+            route: route || 'home',
         });
         mainWindow.loadURL(target);
     }
@@ -1324,16 +1723,23 @@ app.on('before-quit', () => {
     closeToolbarWindow();
 });
 
-app.on('certificate-error',
+app.on(
+    'certificate-error',
     // eslint-disable-next-line max-params
-    (event, webContents, url, error, certificate, callback) => {
-        if (isDev) {
-            event.preventDefault();
-            callback(true);
-        } else {
+    (event, _webContents, url, error, _certificate, callback) => {
+        if (!isAllowedLocalhostCertificateURL(url)) {
             callback(false);
+
+            return;
         }
-    }
+
+        event.preventDefault();
+        recordDiagnosticEvent('localhost-certificate-accepted', {
+            error,
+            origin: normalizeWebOrigin(url),
+        });
+        callback(true);
+    },
 );
 
 app.on('ready', createJitsiMeetWindow);
@@ -1371,11 +1777,7 @@ app.removeAsDefaultProtocolClient(config.default.appProtocolPrefix);
 if (isDev && process.platform === 'win32') {
     // Set the path of electron.exe and your app.
     // These two additional parameters are only available on windows.
-    app.setAsDefaultProtocolClient(
-        config.default.appProtocolPrefix,
-        process.execPath,
-        [ path.resolve(process.argv[1]) ]
-    );
+    app.setAsDefaultProtocolClient(config.default.appProtocolPrefix, process.execPath, [path.resolve(process.argv[1])]);
 } else {
     app.setAsDefaultProtocolClient(config.default.appProtocolPrefix);
 }
@@ -1391,29 +1793,90 @@ app.on('open-url', (event, data) => {
 });
 
 /**
- * This is to notify main.js [this] that front app is ready to receive messages.
- */
-ipcMain.on('renderer-ready', () => {
-    rendererReady = true;
-    if (protocolDataForFrontApp) {
-        mainWindow
-            .webContents
-            .send('protocol-data-msg', protocolDataForFrontApp);
-    }
-});
-
-/**
  * Handle opening external links in the main process.
  */
 ipcMain.on('jitsi-open-url', (event, someUrl) => {
-    openExternalLink(someUrl);
+    if (isTrustedRemoteIpc(event)) {
+        openExternalLink(someUrl);
+    }
 });
 
-ipcMain.handle('desktop:get-info', () => getDesktopInfo());
+ipcMain.handle('desktop:get-info', (event) => (isTrustedRemoteIpc(event) ? getDesktopInfo() : null));
 
-ipcMain.handle('permissions:get-status', () => getPermissionStatus());
+ipcMain.handle('permissions:get-status', (event) => (isTrustedRemoteIpc(event) ? getPermissionStatus() : null));
+
+ipcMain.handle('media:get-status', (event) => (isTrustedRemoteIpc(event) ? getMediaCapabilities() : null));
+
+ipcMain.handle('media:request-access', (event, kind) => {
+    if (!isTrustedRemoteIpc(event)) {
+        return { granted: false, status: 'denied' };
+    }
+
+    return requestNativeMediaAccess(kind);
+});
+
+ipcMain.handle('media:open-settings', (event, kind) => {
+    if (!isTrustedRemoteIpc(event)) {
+        return { ok: false, reason: 'untrusted-sender' };
+    }
+
+    return openMediaSystemSettings(kind);
+});
+
+const isMediaCheckSender = (event) =>
+    mediaCheckWindow && !mediaCheckWindow.isDestroyed() && event.sender === mediaCheckWindow.webContents;
+
+ipcMain.handle('media-check:get-status', (event) => (isMediaCheckSender(event) ? getMediaCapabilities() : null));
+ipcMain.handle('media-check:request-access', (event, kind) => {
+    if (!isMediaCheckSender(event)) {
+        return { granted: false, status: 'denied' };
+    }
+
+    return requestNativeMediaAccess(kind);
+});
+ipcMain.handle('media-check:open-settings', (event, kind) => {
+    if (!isMediaCheckSender(event)) {
+        return { ok: false, reason: 'untrusted-sender' };
+    }
+
+    return openMediaSystemSettings(kind);
+});
+
+const isOfflineMainSender = (event) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+        return false;
+    }
+
+    try {
+        const currentURL = new URL.URL(mainWindow.webContents.getURL());
+
+        return currentURL.protocol === 'file:' && currentURL.pathname.endsWith('/offline/offline.html');
+    } catch (_) {
+        return false;
+    }
+};
+
+ipcMain.on('app:retry', (event) => {
+    if (!isOfflineMainSender(event)) {
+        return;
+    }
+
+    const retryURL = normalizeWebOrigin(lastFailedMainURL) ? lastFailedMainURL : hashMeetServerURL;
+
+    recordDiagnosticEvent('main-window-retry', { url: retryURL });
+    mainWindow.loadURL(retryURL);
+});
+ipcMain.handle('app:copy-diagnostics', (event) =>
+    isOfflineMainSender(event) ? copyDiagnosticsToClipboard() : { ok: false, reason: 'untrusted-sender' },
+);
 
 ipcMain.on('diagnostics:record', (_event, payload) => {
+    const event = _event;
+    const fromToolbar = toolbarWindow && !toolbarWindow.isDestroyed() && event.sender === toolbarWindow.webContents;
+
+    if (!fromToolbar && !isTrustedRemoteIpc(event)) {
+        return;
+    }
     if (payload && typeof payload === 'object' && payload.type) {
         recordDiagnosticEvent(payload.type, payload.payload || {});
     } else {
@@ -1421,12 +1884,22 @@ ipcMain.on('diagnostics:record', (_event, payload) => {
     }
 });
 
-ipcMain.handle('diagnostics:copy', () => copyDiagnosticsToClipboard());
+ipcMain.handle('diagnostics:copy', (event) =>
+    isTrustedRemoteIpc(event)
+        ? copyDiagnosticsToClipboard()
+        : {
+              ok: false,
+              reason: 'untrusted-sender',
+          },
+);
 
 /**
  * Restore the meeting window (e.g. from PiP).
  */
-ipcMain.on('restore-meeting-window', () => {
+ipcMain.on('restore-meeting-window', (event) => {
+    if (!isTrustedRemoteIpc(event)) {
+        return;
+    }
     if (mainWindow) {
         if (mainWindow.isMinimized()) {
             mainWindow.restore();
@@ -1439,13 +1912,19 @@ ipcMain.on('restore-meeting-window', () => {
  * Main renderer requests the floating toolbar (screen share started).
  */
 ipcMain.on('toolbar:open', (_ev, initialState) => {
+    if (!isTrustedRemoteIpc(_ev)) {
+        return;
+    }
     createToolbarWindow(initialState || {});
 });
 
 /**
  * Main renderer requests the floating toolbar be closed (screen share stopped).
  */
-ipcMain.on('toolbar:close', () => {
+ipcMain.on('toolbar:close', (event) => {
+    if (!isTrustedRemoteIpc(event)) {
+        return;
+    }
     closeToolbarWindow();
 });
 
@@ -1454,17 +1933,32 @@ ipcMain.on('toolbar:close', () => {
  * Silently drops when no toolbar window exists.
  */
 ipcMain.on('toolbar:state', (_ev, patch) => {
+    if (!isTrustedRemoteIpc(_ev)) {
+        return;
+    }
     if (toolbarWindow && !toolbarWindow.isDestroyed()) {
         toolbarWindow.webContents.send('toolbar:state', patch || {});
     }
 });
 
-/**
- * Toolbar renderer button click — forward to the main renderer so its
- * existing handlers (handlePause / handleMute / handleStop) run.
- */
-ipcMain.on('toolbar:action', (_ev, payload) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('toolbar:action', payload || {});
+ipcMain.handle('toolbar:execute', (event, payload) => toolbarCommandBroker.execute(event, payload));
+
+ipcMain.on('toolbar:result', (event, result) => {
+    toolbarCommandBroker.handleResult(event, result);
+});
+
+ipcMain.on('call:set-state', (event, state) => {
+    if (!isTrustedRemoteIpc(event) || !state || typeof state !== 'object') {
+        return;
+    }
+
+    callState = {
+        inMeeting: state.inMeeting === true,
+        muted: state.muted !== false,
+        sharing: state.sharing === true,
+    };
+    recordDiagnosticEvent('call-state-changed', callState);
+    if (tray) {
+        tray.setToolTip(callState.inMeeting ? 'HashMeet - meeting in progress' : 'HashMeet');
     }
 });

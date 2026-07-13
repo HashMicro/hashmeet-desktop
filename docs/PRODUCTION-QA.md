@@ -24,8 +24,13 @@ Run this checklist before marking a desktop release production-ready.
   `--allow-server-override` is used.
 - Login, dashboard, create meeting, and join meeting work.
 - Camera and microphone permission prompts work.
+- Audio & Video Setup can select and test microphone, speaker, and camera devices.
+- Denied permissions show the correct OS settings recovery action.
 - Screen sharing starts after source selection.
+- The custom picker refreshes changed sources without losing the current selection.
+- Windows system audio is included only when requested and explicitly selected.
 - Floating screen-share toolbar renders content and its controls work.
+- The toolbar opens on the shared display and is excluded from the captured image.
 - Toolbar does not cover the meeting header or overlap its own controls.
 - Closing the main window hides to tray; Quit exits the app.
 - `hashmeet://meeting/<meeting-id>` opens the target meeting.
@@ -33,6 +38,7 @@ Run this checklist before marking a desktop release production-ready.
 - External HTTP and HTTPS links open in the system browser.
 - Non-web external protocols are not opened from the renderer.
 - Help -> Copy Diagnostics copies a redacted JSON bundle.
+- A failed main-page load shows Retry and Copy Diagnostics instead of a blank window.
 
 ## Platform Matrix
 

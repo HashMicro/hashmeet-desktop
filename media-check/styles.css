@@ -1,0 +1,348 @@
+:root {
+    color-scheme: light dark;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+    letter-spacing: 0;
+    --background: #f4f6f8;
+    --surface: #ffffff;
+    --border: #d8dee6;
+    --text: #17212b;
+    --muted: #5d6975;
+    --primary: #1261a0;
+    --primary-hover: #0c4e83;
+    --success: #18794e;
+    --warning: #946200;
+    --danger: #b42318;
+    --focus: #2383d7;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    min-width: 620px;
+    margin: 0;
+    color: var(--text);
+    background: var(--background);
+}
+
+.app-header {
+    position: sticky;
+    z-index: 2;
+    top: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+
+h1,
+h2,
+p {
+    margin-top: 0;
+}
+
+h1 {
+    margin-bottom: 3px;
+    font-size: 21px;
+    font-weight: 650;
+}
+
+h2 {
+    margin-bottom: 3px;
+    font-size: 16px;
+}
+
+.app-header p,
+.section-heading p,
+.platform-detail {
+    margin-bottom: 0;
+    color: var(--muted);
+}
+
+main {
+    max-width: 1060px;
+    margin: 0 auto;
+    padding: 24px 28px 32px;
+}
+
+.permission-panel,
+.device-panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+}
+
+.permission-panel {
+    margin-bottom: 18px;
+    padding: 18px 20px;
+}
+
+.permission-grid {
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.permission-row {
+    display: grid;
+    grid-template-columns: minmax(110px, 1fr) 92px auto auto;
+    align-items: center;
+    gap: 12px;
+    min-height: 46px;
+    border-bottom: 1px solid var(--border);
+}
+
+.permission-name {
+    font-weight: 600;
+}
+
+.platform-detail {
+    min-height: 20px;
+    margin-top: 10px;
+}
+
+.device-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+}
+
+.device-panel {
+    min-width: 0;
+    padding: 20px;
+}
+
+.camera-panel {
+    grid-column: 1 / -1;
+}
+
+.section-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 62px;
+}
+
+label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+select {
+    width: 100%;
+    height: 38px;
+    padding: 0 34px 0 10px;
+    overflow: hidden;
+    border: 1px solid #aeb8c3;
+    border-radius: 5px;
+    color: var(--text);
+    background: var(--surface);
+    text-overflow: ellipsis;
+}
+
+button,
+select {
+    font: inherit;
+    letter-spacing: 0;
+}
+
+button:focus-visible,
+select:focus-visible,
+audio:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--focus) 35%, transparent);
+    outline-offset: 2px;
+}
+
+.button {
+    min-height: 36px;
+    padding: 7px 13px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.button.primary {
+    color: #ffffff;
+    background: var(--primary);
+}
+
+.button.primary:hover:not(:disabled) {
+    background: var(--primary-hover);
+}
+
+.button.secondary,
+.button.compact {
+    border-color: var(--border);
+    color: var(--text);
+    background: var(--surface);
+}
+
+.button.secondary:hover:not(:disabled),
+.button.compact:hover:not(:disabled) {
+    background: var(--background);
+}
+
+.button.compact {
+    min-height: 30px;
+    padding: 4px 10px;
+}
+
+.button.link {
+    padding-right: 2px;
+    padding-left: 2px;
+    color: var(--primary);
+    background: transparent;
+}
+
+.status {
+    display: inline-block;
+    min-width: 68px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    text-align: right;
+    text-transform: uppercase;
+}
+
+.status.success {
+    color: var(--success);
+}
+
+.status.warning {
+    color: var(--warning);
+}
+
+.status.danger {
+    color: var(--danger);
+}
+
+.meter-row {
+    display: grid;
+    grid-template-columns: 1fr 42px;
+    align-items: center;
+    gap: 10px;
+    margin-top: 16px;
+}
+
+meter {
+    width: 100%;
+    height: 18px;
+}
+
+.meter-value {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px;
+    margin-top: 16px;
+}
+
+audio {
+    width: 100%;
+    height: 38px;
+    margin-top: 14px;
+}
+
+.video-frame {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 100%;
+    max-height: 410px;
+    margin-top: 14px;
+    overflow: hidden;
+    aspect-ratio: 16 / 9;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #171b20;
+}
+
+.video-frame video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+#camera-placeholder {
+    position: absolute;
+    margin: 0;
+    color: #d7dde3;
+}
+
+.notice {
+    margin-top: 18px;
+    padding: 11px 13px;
+    border-left: 3px solid var(--warning);
+    color: var(--text);
+    background: var(--surface);
+}
+
+@media (max-width: 760px) {
+    body {
+        min-width: 0;
+    }
+
+    .app-header {
+        align-items: flex-start;
+        padding: 16px 18px;
+    }
+
+    main {
+        padding: 18px;
+    }
+
+    .device-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .camera-panel {
+        grid-column: auto;
+    }
+
+    .permission-row {
+        grid-template-columns: 1fr auto;
+        padding: 8px 0;
+    }
+
+    .permission-row .status {
+        text-align: right;
+    }
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --background: #15191e;
+        --surface: #20262d;
+        --border: #3a434d;
+        --text: #edf1f5;
+        --muted: #aab4bf;
+        --primary: #2b82c9;
+        --primary-hover: #3b91d6;
+        --success: #57c493;
+        --warning: #e4b34b;
+        --danger: #ff8178;
+        --focus: #65b5f5;
+    }
+
+    select {
+        border-color: #66717d;
+    }
+}

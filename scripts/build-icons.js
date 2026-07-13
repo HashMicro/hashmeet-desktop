@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
-const sharp = require('sharp');
 const png2icons = require('png2icons');
+const sharp = require('sharp');
 
 const SRC = path.join(__dirname, '..', 'brand', 'source-favicon.png');
 const RES = path.join(__dirname, '..', 'resources');
@@ -27,18 +27,28 @@ async function main() {
     fs.writeFileSync(path.join(RES, 'tray-icon@2x.png'), await sharp(master).resize(32, 32).png().toBuffer());
 
     const icns = png2icons.createICNS(master, png2icons.BILINEAR, 0);
-    if (!icns) throw new Error('createICNS returned null');
+
+    if (!icns) {
+        throw new Error('createICNS returned null');
+    }
     fs.writeFileSync(path.join(RES, 'icon.icns'), icns);
 
     const ico = png2icons.createICO(master, png2icons.BILINEAR, 0, false);
-    if (!ico) throw new Error('createICO returned null');
+
+    if (!ico) {
+        throw new Error('createICO returned null');
+    }
     fs.writeFileSync(path.join(RES, 'icon.ico'), ico);
 
     console.log('icons regenerated:');
     for (const f of ['icon.png', 'icon.icns', 'icon.ico', 'tray-icon.png', 'tray-icon@2x.png', 'icons/512x512.png']) {
         const p = path.join(RES, f);
+
         console.log(`  ${f}  ${fs.statSync(p).size} bytes`);
     }
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+});

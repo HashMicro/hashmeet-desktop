@@ -93,6 +93,12 @@ SHOW_DEV_TOOLS=true HASHMEET_DESKTOP_SERVER_URL=http://localhost:8888 npm start
 If `HASHMEET_DESKTOP_SERVER_URL` is not set, the app loads
 `https://meet.hashmicro.com`.
 
+When local HashMeet is configured to use Jitsi at `https://localhost:<port>`,
+the desktop app accepts that localhost certificate automatically. This removes
+the need to visit Jitsi in a browser first and also covers Jitsi signaling over
+`wss://localhost:<port>`. Certificate errors for IP addresses, custom hostnames,
+and remote servers remain blocked.
+
 Packaged production builds always load `https://meet.hashmicro.com` by default.
 `HASHMEET_DESKTOP_SERVER_URL` is ignored in packaged mode unless the build is
 started with `HASHMEET_DESKTOP_ALLOW_SERVER_OVERRIDE=true` or
@@ -107,9 +113,9 @@ npm run smoke
 npm run verify
 ```
 
-The `npm run lint` target exists, but this repo currently has inherited lint
-violations in `main.js` and `scripts/build-icons.js`; treat it as a cleanup
-target before making it required in CI.
+`npm run verify` runs syntax checks, focused Node tests, lint, and the production
+main/preload bundle. The retired upstream React welcome renderer is no longer
+built because HashMeet Desktop loads the live Laravel application directly.
 
 Build installers locally:
 
@@ -124,7 +130,11 @@ npm run dist -- --linux --publish never
 - Login and dashboard work in the desktop window.
 - A meeting can be created and joined.
 - Camera and microphone permission prompts work.
+- Help -> Audio & Video Setup can test microphone input/playback, speaker output,
+  camera preview, and OS permissions before joining.
 - Screen sharing opens the native picker.
+- The custom picker supports source refresh and Windows system-audio sharing
+  when the meeting requests display audio.
 - The native floating toolbar can pause/resume sharing, mute/unmute, and stop
   sharing.
 - Closing the main window hides to tray; Quit exits the app.

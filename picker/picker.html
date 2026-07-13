@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
 <title>Choose what to share</title>
 <style>
   :root {
@@ -83,6 +84,13 @@
     flex-shrink: 0;
   }
 
+  .tabs-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
   .tab {
     min-width: 128px;
     height: 34px;
@@ -127,9 +135,17 @@
   }
 
   .source:hover,
-  .source.focused {
+  .source.focused,
+  .source:focus-visible {
     border-color: var(--accent-2);
     background: #282828;
+    outline: none;
+  }
+
+  .source.selected {
+    border-color: var(--accent);
+    background: #252d3d;
+    box-shadow: 0 0 0 1px var(--accent);
   }
 
   .source:active { transform: scale(0.99); }
@@ -194,6 +210,35 @@
     align-items: center;
   }
 
+  .footer-actions,
+  .share-options {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .share-options {
+    min-width: 0;
+    gap: 18px;
+  }
+
+  .audio-option {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    color: #d4d4d8;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .audio-option.visible { display: flex; }
+
+  .audio-option input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+  }
+
   .hint {
     color: var(--muted);
     font-size: 11px;
@@ -212,6 +257,25 @@
   }
 
   .btn:hover { background: var(--panel-2); }
+
+  .btn:focus-visible,
+  .tab:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 2px;
+  }
+
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+  }
+
+  .btn.primary:hover { background: #1d4ed8; }
+
+  .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.48;
+  }
 </style>
 </head>
 <body>
@@ -219,31 +283,50 @@
   <div class="top">
     <div>
       <h2>Choose what to share</h2>
-      <div class="subtitle" id="summary">Loading available screens and windows.</div>
+      <div class="subtitle" id="summary" role="status" aria-live="polite">Loading available screens and windows.</div>
     </div>
     <label class="search">
-      <input id="search" type="search" placeholder="Search screens or windows" autocomplete="off">
+      <input id="search" type="search" placeholder="Search screens or windows" aria-label="Search screens or windows" autocomplete="off">
     </label>
   </div>
-  <div class="tabs">
-    <button class="tab active" data-type="screen" id="tab-screen">Entire Screen</button>
-    <button class="tab" data-type="window" id="tab-window">Window</button>
+  <div class="tabs-actions">
+    <div class="tabs" role="tablist" aria-label="Share source type">
+      <button class="tab active" data-type="screen" id="tab-screen" role="tab" aria-selected="true">Entire Screen</button>
+      <button class="tab" data-type="window" id="tab-window" role="tab" aria-selected="false">Window</button>
+    </div>
+    <button class="btn" id="refresh" type="button" aria-label="Refresh available screens and windows">Refresh</button>
   </div>
-  <div class="grid-wrap"><div class="grid" id="grid"></div></div>
+  <div class="grid-wrap"><div class="grid" id="grid" role="listbox" aria-label="Available share sources"></div></div>
   <div class="footer">
-    <div class="hint">Use arrow keys to move, Enter to share, Escape to cancel.</div>
-    <button class="btn" id="cancel">Cancel</button>
+    <div class="share-options">
+      <div class="hint">Select a source, then choose Share.</div>
+      <label class="audio-option" id="audio-option">
+        <input id="share-system-audio" type="checkbox">
+        <span>Share system audio</span>
+      </label>
+    </div>
+    <div class="footer-actions">
+      <button class="btn" id="cancel" type="button">Cancel</button>
+      <button class="btn primary" id="share" type="button" disabled>Share</button>
+    </div>
   </div>
 </div>
 <script>
-  const { ipcRenderer } = require('electron');
+  const pickerAPI = window.pickerAPI;
   const grid = document.getElementById('grid');
   const search = document.getElementById('search');
   const summary = document.getElementById('summary');
   const tabs = Array.from(document.querySelectorAll('.tab'));
+  const shareButton = document.getElementById('share');
+  const audioOption = document.getElementById('audio-option');
+  const shareSystemAudio = document.getElementById('share-system-audio');
   let sources = [];
+  let capabilities = {};
   let activeType = localStorage.getItem('hashmeet.sharePicker.type') || 'screen';
   let focusedIndex = 0;
+  let focusedSourceId = null;
+  let selectedId = null;
+  let hasLoadedSources = false;
 
   function typeLabel(type) {
     return type === 'screen' ? 'Screen' : 'Window';
@@ -272,6 +355,7 @@
       const count = counts[type] || 0;
 
       tab.classList.toggle('active', type === activeType);
+      tab.setAttribute('aria-selected', String(type === activeType));
       tab.textContent = `${type === 'screen' ? 'Entire Screen' : 'Window'} (${count})`;
     });
   }
@@ -293,6 +377,7 @@
     if (!cards.length) return;
 
     focusedIndex = Math.max(0, Math.min(index, cards.length - 1));
+    focusedSourceId = cards[focusedIndex].dataset.sourceId;
     cards[focusedIndex].classList.add('focused');
     cards[focusedIndex].focus({ preventScroll: true });
     cards[focusedIndex].scrollIntoView({ block: 'nearest' });
@@ -300,6 +385,7 @@
 
   function render() {
     const filtered = getFiltered();
+    const restoreCardFocus = document.activeElement?.classList?.contains('source');
 
     updateTabs();
     updateSummary(filtered);
@@ -313,6 +399,7 @@
         ? 'No matching sources.'
         : `No ${activeType}s available.`;
       grid.appendChild(empty);
+      syncSelectionControls();
 
       return;
     }
@@ -328,6 +415,11 @@
       el.className = 'source';
       el.tabIndex = 0;
       el.dataset.index = String(index);
+      el.dataset.sourceId = src.id;
+      el.setAttribute('role', 'option');
+      el.setAttribute('aria-label', `${src.name || src.id}, ${typeLabel(src.type)}`);
+      el.setAttribute('aria-selected', String(src.id === selectedId));
+      el.classList.toggle('selected', src.id === selectedId);
       thumb.className = 'thumb';
       img.src = src.thumbnail;
       img.alt = '';
@@ -343,56 +435,132 @@
       meta.appendChild(badge);
       el.appendChild(thumb);
       el.appendChild(meta);
-      el.addEventListener('click', () => select(src.id));
+      el.addEventListener('click', () => selectSource(src.id, index));
+      el.addEventListener('dblclick', () => {
+        selectSource(src.id, index);
+        confirmSelection();
+      });
+      el.addEventListener('keydown', event => {
+        if (event.key === ' ') {
+          event.preventDefault();
+          selectSource(src.id, index);
+        }
+      });
       el.addEventListener('focus', () => {
         focusedIndex = index;
+        focusedSourceId = src.id;
         grid.querySelectorAll('.source').forEach(card => card.classList.remove('focused'));
         el.classList.add('focused');
       });
       grid.appendChild(el);
     });
 
-    focusCard(Math.min(focusedIndex, filtered.length - 1));
+    const preservedIndex = filtered.findIndex(source => source.id === focusedSourceId);
+    focusedIndex = preservedIndex >= 0
+      ? preservedIndex
+      : Math.min(focusedIndex, filtered.length - 1);
+    syncSelectionControls();
+    if (restoreCardFocus) focusCard(focusedIndex);
   }
 
   function setActiveType(type) {
     activeType = type;
     focusedIndex = 0;
+    focusedSourceId = null;
     localStorage.setItem('hashmeet.sharePicker.type', activeType);
     render();
   }
 
-  function select(id) {
-    ipcRenderer.send('picker:select', id);
+  function selectSource(id, index) {
+    selectedId = id;
+    focusedIndex = index;
+    focusedSourceId = id;
+    grid.querySelectorAll('.source').forEach(card => {
+      const selected = card.dataset.sourceId === selectedId;
+
+      card.classList.toggle('selected', selected);
+      card.setAttribute('aria-selected', String(selected));
+    });
+    syncSelectionControls();
+  }
+
+  function syncSelectionControls() {
+    const selected = sources.find(source => source.id === selectedId);
+    const audioSupported = capabilities.systemAudio === true
+      || capabilities.systemAudio === 'loopback'
+      || capabilities.shareSystemAudio === true
+      || capabilities.systemAudioSupported === true
+      || capabilities.canShareSystemAudio === true
+      || capabilities.supportsSystemAudio === true;
+    const audioRequested = capabilities.audioRequested !== false;
+    const showAudio = pickerAPI.platform === 'win32'
+      && audioSupported
+      && audioRequested
+      && selected?.type === 'screen';
+
+    shareButton.disabled = !selected;
+    audioOption.classList.toggle('visible', Boolean(showAudio));
+    if (!showAudio) shareSystemAudio.checked = false;
+  }
+
+  function confirmSelection() {
+    if (!selectedId || !sources.some(source => source.id === selectedId)) return;
+
+    pickerAPI.select({
+      sourceId: selectedId,
+      shareSystemAudio: audioOption.classList.contains('visible') && shareSystemAudio.checked
+    });
   }
 
   function cancel() {
-    ipcRenderer.send('picker:select', null);
+    pickerAPI.select(null);
   }
 
   tabs.forEach(tab => {
     tab.addEventListener('click', () => setActiveType(tab.dataset.type));
+    tab.addEventListener('keydown', event => {
+      if (![ 'ArrowLeft', 'ArrowRight' ].includes(event.key)) return;
+
+      const direction = event.key === 'ArrowRight' ? 1 : -1;
+      const nextIndex = (tabs.indexOf(tab) + direction + tabs.length) % tabs.length;
+
+      event.preventDefault();
+      setActiveType(tabs[nextIndex].dataset.type);
+      tabs[nextIndex].focus();
+    });
   });
 
   search.addEventListener('input', () => {
     focusedIndex = 0;
+    focusedSourceId = null;
     render();
   });
 
   document.getElementById('cancel').addEventListener('click', cancel);
+  shareButton.addEventListener('click', confirmSelection);
+  document.getElementById('refresh').addEventListener('click', () => {
+    summary.textContent = 'Refreshing available screens and windows.';
+    pickerAPI.refresh();
+  });
   window.addEventListener('keydown', event => {
     const filtered = getFiltered();
+    const sourceHasFocus = document.activeElement?.classList?.contains('source');
 
     if (event.key === 'Escape') {
       cancel();
       return;
     }
 
-    if (!filtered.length) return;
+    if (!filtered.length || !sourceHasFocus) return;
 
     if (event.key === 'Enter') {
       event.preventDefault();
-      select(filtered[focusedIndex].id);
+      const focused = filtered[focusedIndex];
+
+      if (focused) {
+        if (selectedId !== focused.id) selectSource(focused.id, focusedIndex);
+        confirmSelection();
+      }
       return;
     }
 
@@ -410,14 +578,36 @@
     }
   });
 
-  ipcRenderer.on('sources', (_ev, list) => {
-    sources = Array.isArray(list) ? list : [];
+  pickerAPI.onSources(payload => {
+    const nextSources = Array.isArray(payload) ? payload : payload?.sources;
+    const nextCapabilities = Array.isArray(payload)
+      ? {}
+      : {
+          ...(payload && typeof payload === 'object' ? payload : {}),
+          ...(payload?.metadata || {}),
+          ...(payload?.capabilities || {})
+        };
+
+    sources = Array.isArray(nextSources) ? nextSources : [];
+    capabilities = nextCapabilities && typeof nextCapabilities === 'object' ? nextCapabilities : {};
+    if (selectedId && !sources.some(source => source.id === selectedId)) selectedId = null;
     if (!sources.some(source => source.type === activeType)) {
       activeType = sources.some(source => source.type === 'screen') ? 'screen' : 'window';
     }
     render();
-    search.focus();
+    if (!hasLoadedSources) {
+      hasLoadedSources = true;
+      search.focus();
+    }
   });
+  pickerAPI.onError(payload => {
+    summary.textContent = payload?.message || 'Could not refresh share sources.';
+  });
+
+  const refreshTimer = window.setInterval(() => {
+    if (document.visibilityState === 'visible') pickerAPI.refresh();
+  }, 3000);
+  window.addEventListener('beforeunload', () => window.clearInterval(refreshTimer));
 
   updateTabs();
 </script>
