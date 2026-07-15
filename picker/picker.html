@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
@@ -291,8 +291,8 @@
   </div>
   <div class="tabs-actions">
     <div class="tabs" role="tablist" aria-label="Share source type">
-      <button class="tab active" data-type="screen" id="tab-screen" role="tab" aria-selected="true">Entire Screen</button>
-      <button class="tab" data-type="window" id="tab-window" role="tab" aria-selected="false">Window</button>
+      <button class="tab active" data-type="screen" id="tab-screen" role="tab" aria-selected="true" aria-controls="grid" tabindex="0">Entire Screen</button>
+      <button class="tab" data-type="window" id="tab-window" role="tab" aria-selected="false" aria-controls="grid" tabindex="-1">Window</button>
     </div>
     <button class="btn" id="refresh" type="button" aria-label="Refresh available screens and windows">Refresh</button>
   </div>
@@ -318,6 +318,7 @@
   const summary = document.getElementById('summary');
   const tabs = Array.from(document.querySelectorAll('.tab'));
   const shareButton = document.getElementById('share');
+  const refreshButton = document.getElementById('refresh');
   const audioOption = document.getElementById('audio-option');
   const shareSystemAudio = document.getElementById('share-system-audio');
   let sources = [];
@@ -327,6 +328,9 @@
   let focusedSourceId = null;
   let selectedId = null;
   let hasLoadedSources = false;
+  let lastSourceSignature = '';
+  let refreshInFlight = false;
+  let refreshTimeout = 0;
 
   function typeLabel(type) {
     return type === 'screen' ? 'Screen' : 'Window';
@@ -356,6 +360,7 @@
 
       tab.classList.toggle('active', type === activeType);
       tab.setAttribute('aria-selected', String(type === activeType));
+      tab.tabIndex = type === activeType ? 0 : -1;
       tab.textContent = `${type === 'screen' ? 'Entire Screen' : 'Window'} (${count})`;
     });
   }
@@ -373,12 +378,16 @@
   function focusCard(index) {
     const cards = Array.from(grid.querySelectorAll('.source'));
 
-    cards.forEach(card => card.classList.remove('focused'));
+    cards.forEach(card => {
+      card.classList.remove('focused');
+      card.tabIndex = -1;
+    });
     if (!cards.length) return;
 
     focusedIndex = Math.max(0, Math.min(index, cards.length - 1));
     focusedSourceId = cards[focusedIndex].dataset.sourceId;
     cards[focusedIndex].classList.add('focused');
+    cards[focusedIndex].tabIndex = 0;
     cards[focusedIndex].focus({ preventScroll: true });
     cards[focusedIndex].scrollIntoView({ block: 'nearest' });
   }
@@ -386,6 +395,11 @@
   function render() {
     const filtered = getFiltered();
     const restoreCardFocus = document.activeElement?.classList?.contains('source');
+    const preservedIndex = filtered.findIndex(source => source.id === focusedSourceId);
+
+    focusedIndex = preservedIndex >= 0
+      ? preservedIndex
+      : Math.max(0, Math.min(focusedIndex, filtered.length - 1));
 
     updateTabs();
     updateSummary(filtered);
@@ -413,7 +427,7 @@
       const badge = document.createElement('span');
 
       el.className = 'source';
-      el.tabIndex = 0;
+      el.tabIndex = index === focusedIndex ? 0 : -1;
       el.dataset.index = String(index);
       el.dataset.sourceId = src.id;
       el.setAttribute('role', 'option');
@@ -449,16 +463,16 @@
       el.addEventListener('focus', () => {
         focusedIndex = index;
         focusedSourceId = src.id;
-        grid.querySelectorAll('.source').forEach(card => card.classList.remove('focused'));
+        grid.querySelectorAll('.source').forEach(card => {
+          card.classList.remove('focused');
+          card.tabIndex = -1;
+        });
         el.classList.add('focused');
+        el.tabIndex = 0;
       });
       grid.appendChild(el);
     });
 
-    const preservedIndex = filtered.findIndex(source => source.id === focusedSourceId);
-    focusedIndex = preservedIndex >= 0
-      ? preservedIndex
-      : Math.min(focusedIndex, filtered.length - 1);
     syncSelectionControls();
     if (restoreCardFocus) focusCard(focusedIndex);
   }
@@ -480,12 +494,24 @@
 
       card.classList.toggle('selected', selected);
       card.setAttribute('aria-selected', String(selected));
+      card.tabIndex = card.dataset.sourceId === focusedSourceId ? 0 : -1;
     });
     syncSelectionControls();
   }
 
+  function refreshRenderedThumbnails() {
+    grid.querySelectorAll('.source').forEach(card => {
+      const source = sources.find(item => item.id === card.dataset.sourceId);
+      const image = card.querySelector('img');
+
+      if (source?.thumbnail && image && image.src !== source.thumbnail) {
+        image.src = source.thumbnail;
+      }
+    });
+  }
+
   function syncSelectionControls() {
-    const selected = sources.find(source => source.id === selectedId);
+    const selected = getFiltered().find(source => source.id === selectedId);
     const audioSupported = capabilities.systemAudio === true
       || capabilities.systemAudio === 'loopback'
       || capabilities.shareSystemAudio === true
@@ -504,7 +530,7 @@
   }
 
   function confirmSelection() {
-    if (!selectedId || !sources.some(source => source.id === selectedId)) return;
+    if (!selectedId || !getFiltered().some(source => source.id === selectedId)) return;
 
     pickerAPI.select({
       sourceId: selectedId,
@@ -514,6 +540,27 @@
 
   function cancel() {
     pickerAPI.select(null);
+  }
+
+  function completeRefresh() {
+    refreshInFlight = false;
+    refreshButton.disabled = false;
+    refreshButton.setAttribute('aria-busy', 'false');
+    window.clearTimeout(refreshTimeout);
+  }
+
+  function requestRefresh(announce = false) {
+    if (refreshInFlight) return;
+
+    refreshInFlight = true;
+    refreshButton.disabled = true;
+    refreshButton.setAttribute('aria-busy', 'true');
+    if (announce) summary.textContent = 'Refreshing available screens and windows.';
+    pickerAPI.refresh();
+    refreshTimeout = window.setTimeout(() => {
+      completeRefresh();
+      if (announce) summary.textContent = 'Refresh timed out. Try again.';
+    }, 5000);
   }
 
   tabs.forEach(tab => {
@@ -538,10 +585,7 @@
 
   document.getElementById('cancel').addEventListener('click', cancel);
   shareButton.addEventListener('click', confirmSelection);
-  document.getElementById('refresh').addEventListener('click', () => {
-    summary.textContent = 'Refreshing available screens and windows.';
-    pickerAPI.refresh();
-  });
+  refreshButton.addEventListener('click', () => requestRefresh(true));
   window.addEventListener('keydown', event => {
     const filtered = getFiltered();
     const sourceHasFocus = document.activeElement?.classList?.contains('source');
@@ -575,6 +619,12 @@
 
       event.preventDefault();
       focusCard(next);
+      return;
+    }
+
+    if ([ 'Home', 'End' ].includes(event.key)) {
+      event.preventDefault();
+      focusCard(event.key === 'Home' ? 0 : filtered.length - 1);
     }
   });
 
@@ -583,30 +633,48 @@
     const nextCapabilities = Array.isArray(payload)
       ? {}
       : {
-          ...(payload && typeof payload === 'object' ? payload : {}),
           ...(payload?.metadata || {}),
-          ...(payload?.capabilities || {})
+          ...(payload?.capabilities || {}),
+          ...(payload?.request || {})
         };
+    const normalizedSources = Array.isArray(nextSources) ? nextSources : [];
+    const nextSignature = JSON.stringify(normalizedSources.map(source => [
+      source.id,
+      source.name,
+      source.type,
+      source.displayId
+    ]));
+    const sourcesChanged = nextSignature !== lastSourceSignature;
 
-    sources = Array.isArray(nextSources) ? nextSources : [];
+    completeRefresh();
+    sources = normalizedSources;
     capabilities = nextCapabilities && typeof nextCapabilities === 'object' ? nextCapabilities : {};
     if (selectedId && !sources.some(source => source.id === selectedId)) selectedId = null;
     if (!sources.some(source => source.type === activeType)) {
       activeType = sources.some(source => source.type === 'screen') ? 'screen' : 'window';
     }
-    render();
+    if (sourcesChanged || !hasLoadedSources) {
+      lastSourceSignature = nextSignature;
+      render();
+    } else {
+      refreshRenderedThumbnails();
+      syncSelectionControls();
+    }
     if (!hasLoadedSources) {
       hasLoadedSources = true;
       search.focus();
     }
   });
   pickerAPI.onError(payload => {
+    completeRefresh();
     summary.textContent = payload?.message || 'Could not refresh share sources.';
   });
 
   const refreshTimer = window.setInterval(() => {
-    if (document.visibilityState === 'visible') pickerAPI.refresh();
-  }, 3000);
+    const navigatingSources = document.activeElement?.classList?.contains('source');
+
+    if (document.visibilityState === 'visible' && !navigatingSources) requestRefresh(false);
+  }, 6000);
   window.addEventListener('beforeunload', () => window.clearInterval(refreshTimer));
 
   updateTabs();

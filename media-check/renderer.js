@@ -3,6 +3,8 @@
 const api = window.mediaCheckAPI;
 const elements = Object.freeze({
     cameraPermission: document.getElementById('camera-permission'),
+    cameraRequest: document.querySelector('[data-request="camera"]'),
+    cameraSettings: document.querySelector('[data-settings="camera"]'),
     cameraPlaceholder: document.getElementById('camera-placeholder'),
     cameraPreview: document.getElementById('camera-preview'),
     cameraSelect: document.getElementById('camera-select'),
@@ -10,6 +12,8 @@ const elements = Object.freeze({
     meter: document.getElementById('microphone-meter'),
     meterValue: document.getElementById('meter-value'),
     microphonePermission: document.getElementById('microphone-permission'),
+    microphoneRequest: document.querySelector('[data-request="microphone"]'),
+    microphoneSettings: document.querySelector('[data-settings="microphone"]'),
     microphoneSelect: document.getElementById('microphone-select'),
     microphoneState: document.getElementById('microphone-state'),
     notice: document.getElementById('notice'),
@@ -123,6 +127,22 @@ function permissionTone(value) {
     return 'warning';
 }
 
+function isGrantedPermission(value) {
+    return ['granted', 'authorized', 'allowed'].includes(value);
+}
+
+function renderPermissionActions(kind, value, systemSettings = {}) {
+    const requestButton = elements[`${kind}Request`];
+    const settingsButton = elements[`${kind}Settings`];
+    const granted = isGrantedPermission(value);
+    const denied = ['denied', 'restricted', 'blocked'].includes(value);
+
+    requestButton.hidden = granted;
+    requestButton.disabled = granted;
+    requestButton.textContent = denied ? 'Try again' : 'Allow';
+    settingsButton.hidden = systemSettings[kind] !== true || granted || !denied;
+}
+
 function renderNativeStatus(status = {}) {
     const safeStatus = status && typeof status === 'object' ? status : {};
     const permissions = safeStatus.permissions || safeStatus;
@@ -131,6 +151,8 @@ function renderNativeStatus(status = {}) {
 
     setStatus(elements.microphonePermission, microphone, permissionTone(microphone));
     setStatus(elements.cameraPermission, camera, permissionTone(camera));
+    renderPermissionActions('microphone', microphone, safeStatus.systemSettings || {});
+    renderPermissionActions('camera', camera, safeStatus.systemSettings || {});
     const environment = [safeStatus.platform, safeStatus.sessionType].filter(Boolean).join(' / ');
 
     elements.platformDetail.textContent =
@@ -206,6 +228,7 @@ async function startMicrophone() {
 
             elements.meter.value = level;
             elements.meterValue.textContent = `${Math.round(level * 100)}%`;
+            elements.meter.setAttribute('aria-valuetext', `${Math.round(level * 100)} percent`);
             meterAnimation = requestAnimationFrame(updateMeter);
         };
 
@@ -364,7 +387,26 @@ async function requestAccess(kind, button) {
     try {
         const result = await api.requestAccess(kind);
 
-        if (result && result.granted === false) {
+        if (result?.requiresDeviceRequest) {
+            let stream;
+
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    audio: kind === 'microphone',
+                    video: kind === 'camera',
+                });
+                stopStream(stream);
+                await api.reportDeviceAccess({ kind, granted: true });
+                showNotice(`${kind === 'camera' ? 'Camera' : 'Microphone'} access is available.`);
+            } catch (error) {
+                await api.reportDeviceAccess({
+                    kind,
+                    granted: false,
+                    errorName: error?.name || 'Error',
+                });
+                throw error;
+            }
+        } else if (result && result.granted === false) {
             showNotice(`${kind === 'camera' ? 'Camera' : 'Microphone'} access was not granted.`);
         }
         await refreshStatus();

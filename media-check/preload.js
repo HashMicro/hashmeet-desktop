@@ -5,6 +5,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const CHANNELS = Object.freeze({
     GET_STATUS: 'media-check:get-status',
     OPEN_SETTINGS: 'media-check:open-settings',
+    REPORT_DEVICE_ACCESS: 'media-check:report-device-access',
     REQUEST_ACCESS: 'media-check:request-access',
     STATUS_CHANGED: 'media-check:status-changed',
 });
@@ -35,6 +36,7 @@ contextBridge.exposeInMainWorld(
             return () => ipcRenderer.removeListener(CHANNELS.STATUS_CHANGED, listener);
         },
         openSystemSettings: (kind) => ipcRenderer.invoke(CHANNELS.OPEN_SETTINGS, requireAccessKind(kind)),
+        reportDeviceAccess: (result) => ipcRenderer.invoke(CHANNELS.REPORT_DEVICE_ACCESS, result),
         requestAccess: (kind) => ipcRenderer.invoke(CHANNELS.REQUEST_ACCESS, requireAccessKind(kind)),
     }),
 );

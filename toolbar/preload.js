@@ -19,5 +19,6 @@ contextBridge.exposeInMainWorld(
                 type: `toolbar-${type}`,
                 payload,
             }),
+        returnFocusToMeeting: () => ipcRenderer.send('toolbar:return-focus'),
     }),
 );

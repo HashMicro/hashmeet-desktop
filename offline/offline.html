@@ -24,8 +24,8 @@
 <body>
   <main>
     <div class="icon" aria-hidden="true">!</div>
-    <h1>HashMeet could not connect</h1>
-    <p>Check your internet connection or VPN, then retry. Your diagnostic report can help support identify connection and desktop permission problems.</p>
+    <h1 id="title">HashMeet could not connect</h1>
+    <p id="message">Check your internet connection or VPN, then retry. Your diagnostic report can help support identify connection and desktop permission problems.</p>
     <div class="actions">
       <button class="primary" id="retry" type="button">Retry</button>
       <button id="diagnostics" type="button">Copy diagnostics</button>
@@ -33,14 +33,61 @@
     <div id="status" role="status" aria-live="polite"></div>
   </main>
   <script>
+    const params = new URLSearchParams(window.location.search);
+    const reason = params.get('reason') || 'offline';
     const status = document.getElementById('status');
-    document.getElementById('retry').addEventListener('click', () => {
-      status.textContent = 'Reconnecting...';
-      window.jitsiNodeAPI?.offline?.retry();
+    const retry = document.getElementById('retry');
+    const diagnostics = document.getElementById('diagnostics');
+    const title = document.getElementById('title');
+    const message = document.getElementById('message');
+    let retryTimer = 0;
+    let retrying = false;
+
+    if (reason === 'crash') {
+      title.textContent = 'HashMeet needs to reload';
+      message.textContent = 'The meeting window stopped unexpectedly. Reload HashMeet, or copy diagnostics for support.';
+      retry.textContent = 'Reload HashMeet';
+    }
+
+    function setRetrying(value) {
+      retrying = value;
+      retry.disabled = value;
+      retry.setAttribute('aria-busy', String(value));
+    }
+
+    function runRetry() {
+      if (retrying) return;
+
+      setRetrying(true);
+      status.textContent = reason === 'crash' ? 'Reloading...' : 'Reconnecting...';
+      try {
+        window.jitsiNodeAPI?.offline?.retry();
+      } catch (_) {
+        status.textContent = 'Could not start retry. Copy diagnostics and contact support.';
+        setRetrying(false);
+        return;
+      }
+
+      window.setTimeout(() => setRetrying(false), 1500);
+    }
+
+    retry.addEventListener('click', runRetry);
+    window.addEventListener('online', () => {
+      window.clearTimeout(retryTimer);
+      retryTimer = window.setTimeout(runRetry, 500);
     });
-    document.getElementById('diagnostics').addEventListener('click', async () => {
-      const result = await window.jitsiNodeAPI?.offline?.copyDiagnostics();
-      status.textContent = result?.ok ? 'Diagnostics copied.' : 'Could not copy diagnostics.';
+    diagnostics.addEventListener('click', async () => {
+      diagnostics.disabled = true;
+      diagnostics.setAttribute('aria-busy', 'true');
+      try {
+        const result = await window.jitsiNodeAPI?.offline?.copyDiagnostics();
+        status.textContent = result?.ok ? 'Diagnostics copied.' : 'Could not copy diagnostics.';
+      } catch (_) {
+        status.textContent = 'Could not copy diagnostics.';
+      } finally {
+        diagnostics.disabled = false;
+        diagnostics.setAttribute('aria-busy', 'false');
+      }
     });
   </script>
 </body>

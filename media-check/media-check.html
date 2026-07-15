@@ -24,15 +24,15 @@
             <div class="permission-grid">
                 <div class="permission-row">
                     <span class="permission-name">Microphone</span>
-                    <span id="microphone-permission" class="status neutral">Checking</span>
-                    <button class="button compact" data-request="microphone" type="button">Allow</button>
-                    <button class="button link" data-settings="microphone" type="button">Open settings</button>
+                    <span id="microphone-permission" class="status neutral" role="status" aria-live="polite">Checking</span>
+                    <button class="button compact" data-request="microphone" type="button" aria-describedby="microphone-permission">Allow</button>
+                    <button class="button link" data-settings="microphone" type="button" aria-describedby="microphone-permission">Open settings</button>
                 </div>
                 <div class="permission-row">
                     <span class="permission-name">Camera</span>
-                    <span id="camera-permission" class="status neutral">Checking</span>
-                    <button class="button compact" data-request="camera" type="button">Allow</button>
-                    <button class="button link" data-settings="camera" type="button">Open settings</button>
+                    <span id="camera-permission" class="status neutral" role="status" aria-live="polite">Checking</span>
+                    <button class="button compact" data-request="camera" type="button" aria-describedby="camera-permission">Allow</button>
+                    <button class="button link" data-settings="camera" type="button" aria-describedby="camera-permission">Open settings</button>
                 </div>
             </div>
             <p id="platform-detail" class="platform-detail" aria-live="polite"></p>
@@ -45,13 +45,13 @@
                         <h2 id="microphone-title">Microphone</h2>
                         <p>Speak normally and check that the meter responds.</p>
                     </div>
-                    <span id="microphone-state" class="status neutral">Idle</span>
+                    <span id="microphone-state" class="status neutral" role="status" aria-live="polite">Idle</span>
                 </div>
 
                 <label for="microphone-select">Input device</label>
                 <select id="microphone-select"></select>
                 <div class="meter-row">
-                    <meter id="microphone-meter" min="0" max="1" low="0.08" high="0.7" optimum="0.45" value="0"></meter>
+                    <meter id="microphone-meter" min="0" max="1" low="0.08" high="0.7" optimum="0.45" value="0" aria-label="Microphone input level" aria-valuetext="0 percent"></meter>
                     <span id="meter-value" class="meter-value">0%</span>
                 </div>
                 <div class="actions">
@@ -67,7 +67,7 @@
                         <h2 id="speaker-title">Speaker</h2>
                         <p>Play a short tone through the selected output.</p>
                     </div>
-                    <span id="speaker-state" class="status neutral">Idle</span>
+                    <span id="speaker-state" class="status neutral" role="status" aria-live="polite">Idle</span>
                 </div>
 
                 <label for="speaker-select">Output device</label>
@@ -83,7 +83,7 @@
                         <h2 id="camera-title">Camera</h2>
                         <p>Confirm that the preview is clear and framed correctly.</p>
                     </div>
-                    <span id="camera-state" class="status neutral">Idle</span>
+                    <span id="camera-state" class="status neutral" role="status" aria-live="polite">Idle</span>
                 </div>
 
                 <label for="camera-select">Video device</label>

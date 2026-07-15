@@ -116,7 +116,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: rgba(255, 255, 255, 0.62);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
   }
 
@@ -142,7 +142,7 @@
     border: 1px solid rgba(255, 255, 255, 0.12);
     color: rgba(255, 255, 255, 0.78);
     background: rgba(255, 255, 255, 0.06);
-    font-size: 9px;
+    font-size: 10px;
     line-height: 20px;
     font-weight: 700;
     text-transform: uppercase;
@@ -152,7 +152,12 @@
   .hm-chip .bi { width: 12px; height: 12px; }
   #hm-tb-source-type .bi { display: none; }
   #hm-tb-source-type { width: 62px; }
-  #hm-tb-quality { width: 68px; }
+  #hm-tb-quality { width: 96px; max-width: 96px; }
+  #hm-tb-quality .bi {
+    width: 26px;
+    min-width: 26px;
+    overflow: hidden;
+  }
   #hm-tb-mic { width: 66px; }
 
   .hm-chip span {
@@ -196,7 +201,7 @@
   }
 
   #hm-tb-controls button i { font-size: 18px; line-height: 1; }
-  #hm-tb-controls button span { font-size: 9px; font-weight: 700; }
+  #hm-tb-controls button span { font-size: 11px; font-weight: 700; }
   #hm-tb-controls button:hover { background: rgba(255, 255, 255, 0.1); }
   #hm-tb-controls button:disabled {
     opacity: 0.48;
@@ -244,7 +249,7 @@
     border-radius: 6px;
     background: #3f1216;
     color: #fecaca;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     line-height: 1.2;
     overflow: hidden;
@@ -259,6 +264,25 @@
   @keyframes hmTbPulse {
     0%, 100% { outline-color: rgba(245, 158, 11, 0.72); }
     50% { outline-color: rgba(245, 158, 11, 0.24); }
+  }
+
+  @media (max-width: 520px) {
+    #hm-toolbar-inner {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
+      padding: 10px;
+    }
+    #hm-tb-context,
+    #hm-tb-meta { display: none; }
+    #hm-tb-controls {
+      width: 100%;
+      justify-content: space-around;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #hm-tb-pause.hm-tb-paused { animation: none; }
+    #hm-tb-controls button { transition: none; }
   }
 
   .sr-only {
@@ -541,6 +565,13 @@
   for (const action of ['pause', 'switch', 'mute', 'stop']) {
     $(`hm-tb-${action}`).addEventListener('click', () => runToolbarAction(action));
   }
+
+  window.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+
+    event.preventDefault();
+    toolbarBridge.returnFocusToMeeting();
+  });
 
   renderAll();
   recordToolbarDiagnostic('ready', {

@@ -12,6 +12,7 @@ const {
     app,
     clipboard,
     desktopCapturer,
+    dialog,
     ipcMain,
     screen,
     shell,
@@ -35,6 +36,7 @@ const { createDisplayMediaGrant } = require('./lib/display-media-policy');
 const { getScreenShareCapabilities, normalizePermissionStatus } = require('./lib/media-policy');
 const { createOriginPolicy, isTrustedIpcSender, normalizeWebOrigin } = require('./lib/origin-policy');
 const { createToolbarCommandBroker } = require('./lib/toolbar-command-broker');
+const { classifyDeviceAccessResult, getMediaPermissionTargets, getToolbarWindowBounds } = require('./lib/ux-policy');
 const pkgJson = require('./package.json');
 
 const showDevTools = Boolean(process.env.SHOW_DEV_TOOLS) || process.argv.includes('--show-dev-tools');
@@ -269,12 +271,16 @@ let chromeCSSGeneration = 0;
 const MAX_DIAGNOSTIC_EVENTS = 80;
 const diagnosticsEvents = [];
 const permissionState = {
+    camera: { status: 'unknown' },
+    microphone: { status: 'unknown' },
     media: { status: 'unknown' },
     displayCapture: { status: 'unknown' },
     notifications: { status: 'unknown' },
     openExternal: { status: 'blocked' },
 };
 let lastScreenShareSource = null;
+let recoveryScreenActive = false;
+let unresponsivePromptActive = false;
 
 /**
  * Add protocol data
@@ -413,8 +419,10 @@ function getNativeMediaPermissionStatus() {
         permissions.microphone = normalizePermissionStatus(systemPreferences.getMediaAccessStatus('microphone'));
         permissions.screen = normalizePermissionStatus(systemPreferences.getMediaAccessStatus('screen'));
     } else {
-        permissions.camera = normalizePermissionStatus(permissionState.media?.status);
-        permissions.microphone = normalizePermissionStatus(permissionState.media?.status);
+        permissions.camera = normalizePermissionStatus(permissionState.camera?.status || permissionState.media?.status);
+        permissions.microphone = normalizePermissionStatus(
+            permissionState.microphone?.status || permissionState.media?.status,
+        );
         permissions.screen = normalizePermissionStatus(permissionState.displayCapture?.status);
     }
 
@@ -433,6 +441,11 @@ function getMediaCapabilities() {
         platform: process.platform,
         sessionType: isWaylandSession() ? 'wayland' : process.env.XDG_SESSION_TYPE || null,
         permissions: getNativeMediaPermissionStatus(),
+        systemSettings: {
+            camera: Boolean(getMediaSystemSettingsTarget('camera')),
+            microphone: Boolean(getMediaSystemSettingsTarget('microphone')),
+            screen: Boolean(getMediaSystemSettingsTarget('screen')),
+        },
         screenShare: {
             ...screenShare,
             sourceSwitching: true,
@@ -459,9 +472,16 @@ async function requestNativeMediaAccess(kind) {
     if (process.platform === 'darwin') {
         granted = await systemPreferences.askForMediaAccess(kind);
     } else {
-        const status = getNativeMediaPermissionStatus()[kind];
+        recordDiagnosticEvent('media-access-device-request-required', {
+            kind,
+            platform: process.platform,
+        });
 
-        granted = !['blocked', 'denied', 'restricted'].includes(status);
+        return {
+            granted: false,
+            status: getNativeMediaPermissionStatus()[kind],
+            requiresDeviceRequest: true,
+        };
     }
 
     const result = {
@@ -475,7 +495,7 @@ async function requestNativeMediaAccess(kind) {
     return result;
 }
 
-async function openMediaSystemSettings(kind) {
+function getMediaSystemSettingsTarget(kind) {
     const targets = {
         darwin: {
             camera: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Camera',
@@ -488,7 +508,12 @@ async function openMediaSystemSettings(kind) {
             screen: 'ms-settings:privacy-screenshotborders',
         },
     };
-    const target = targets[process.platform]?.[kind];
+
+    return targets[process.platform]?.[kind] || null;
+}
+
+async function openMediaSystemSettings(kind) {
+    const target = getMediaSystemSettingsTarget(kind);
 
     if (!target) {
         return { ok: false, reason: 'unsupported' };
@@ -572,6 +597,15 @@ function updatePermissionState(permission, status, details = {}) {
     }
 
     permissionState[key] = sanitizeDiagnosticValue(snapshot);
+
+    if (permission === 'media') {
+        getMediaPermissionTargets(permission, details).forEach((target) => {
+            permissionState[target] = sanitizeDiagnosticValue({
+                ...snapshot,
+                permission: target,
+            });
+        });
+    }
     recordDiagnosticEvent('permission-request', {
         permission,
         status,
@@ -649,6 +683,63 @@ function attachToolbarWindowDiagnostics(targetWindow) {
             sourceId,
         });
     });
+}
+
+function showMainRecoveryScreen(reason, details = {}) {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+        return;
+    }
+
+    if (recoveryScreenActive && mainWindow.webContents.getURL().startsWith('file:')) {
+        return;
+    }
+
+    const recoveryURL = details.url || lastFailedMainURL || getCurrentURLSummary();
+
+    recoveryScreenActive = true;
+    lastFailedMainURL = normalizeWebOrigin(recoveryURL) ? recoveryURL : hashMeetServerURL;
+    closeToolbarWindow();
+    recordDiagnosticEvent('main-window-recovery-screen', {
+        reason,
+        ...details,
+    });
+    mainWindow.loadFile(resolveAppAssetPath('offline', 'offline.html'), {
+        query: {
+            reason: String(reason || 'offline'),
+        },
+    });
+}
+
+async function promptForUnresponsiveRenderer(details = {}) {
+    if (unresponsivePromptActive || !mainWindow || mainWindow.isDestroyed()) {
+        return;
+    }
+
+    unresponsivePromptActive = true;
+    recordDiagnosticEvent('main-window-unresponsive', details);
+
+    try {
+        const result = await dialog.showMessageBox(mainWindow, {
+            type: 'warning',
+            buttons: ['Wait', 'Reload'],
+            defaultId: 0,
+            cancelId: 0,
+            title: 'HashMeet is not responding',
+            message: 'HashMeet is taking longer than expected to respond.',
+            detail: 'You can wait, or reload the meeting window. Diagnostics will keep the recovery event.',
+        });
+
+        if (result.response === 1 && mainWindow && !mainWindow.isDestroyed()) {
+            recordDiagnosticEvent('main-window-unresponsive-reload');
+            mainWindow.reload();
+        }
+    } catch (err) {
+        recordDiagnosticEvent('main-window-unresponsive-dialog-error', {
+            message: err.message,
+        });
+    } finally {
+        unresponsivePromptActive = false;
+    }
 }
 
 function grantScreenShareSource(source, callback, origin = 'custom-picker', options = {}) {
@@ -1179,7 +1270,7 @@ function setupScreenShareHandler(window) {
  * Loaded from `toolbar/toolbar.html`; state is fed via IPC.
  *
  * Positioned bottom-center of the primary display. On Wayland we avoid
- * transparent/non-focusable flags because some compositors render them blank.
+ * transparent flags because some compositors render them blank.
  */
 function createToolbarWindow(initialState) {
     if (toolbarWindow && !toolbarWindow.isDestroyed()) {
@@ -1195,19 +1286,14 @@ function createToolbarWindow(initialState) {
         ? screen.getAllDisplays().find((display) => String(display.id) === String(lastScreenShareSource.displayId))
         : null;
     const { workArea } = sharedDisplay || screen.getPrimaryDisplay();
-    const TOOLBAR_WIDTH = Math.min(680, Math.max(560, workArea.width - 48));
-    const TOOLBAR_HEIGHT = 104;
-    const MARGIN_BOTTOM = 40;
     const opaqueToolbarWindow = shouldUseOpaqueToolbarWindow();
-
-    const x = Math.round(workArea.x + (workArea.width - TOOLBAR_WIDTH) / 2);
-    const y = Math.round(workArea.y + workArea.height - TOOLBAR_HEIGHT - MARGIN_BOTTOM);
+    const bounds = getToolbarWindowBounds(workArea);
 
     toolbarWindow = new BrowserWindow({
-        width: TOOLBAR_WIDTH,
-        height: TOOLBAR_HEIGHT,
-        x,
-        y,
+        width: bounds.width,
+        height: bounds.height,
+        x: bounds.x,
+        y: bounds.y,
         frame: false,
         transparent: !opaqueToolbarWindow,
         backgroundColor: opaqueToolbarWindow ? '#18181b' : '#00000000',
@@ -1218,7 +1304,7 @@ function createToolbarWindow(initialState) {
         fullscreenable: false,
         skipTaskbar: true,
         alwaysOnTop: true,
-        focusable: opaqueToolbarWindow,
+        focusable: true,
         acceptFirstMouse: true,
         hasShadow: !opaqueToolbarWindow,
         show: false,
@@ -1235,9 +1321,9 @@ function createToolbarWindow(initialState) {
     attachToolbarWindowDiagnostics(toolbarWindow);
     recordDiagnosticEvent('toolbar-window-created', {
         opaque: opaqueToolbarWindow,
-        focusable: opaqueToolbarWindow,
+        focusable: true,
         wayland: isWaylandSession(),
-        bounds: { x, y, width: TOOLBAR_WIDTH, height: TOOLBAR_HEIGHT },
+        bounds,
     });
     toolbarWindow.setAlwaysOnTop(true, 'screen-saver');
     toolbarWindow.setContentProtection(true);
@@ -1254,6 +1340,24 @@ function createToolbarWindow(initialState) {
     });
     toolbarWindow.loadFile(toolbarPath);
 
+    const repositionToolbar = () => {
+        if (!toolbarWindow || toolbarWindow.isDestroyed()) {
+            return;
+        }
+
+        const activeDisplay = lastScreenShareSource?.displayId
+            ? screen.getAllDisplays().find((display) => String(display.id) === String(lastScreenShareSource.displayId))
+            : screen.getDisplayMatching(toolbarWindow.getBounds());
+        const nextBounds = getToolbarWindowBounds((activeDisplay || screen.getPrimaryDisplay()).workArea);
+
+        toolbarWindow.setBounds(nextBounds, false);
+        recordDiagnosticEvent('toolbar-window-repositioned', { bounds: nextBounds });
+    };
+
+    screen.on('display-added', repositionToolbar);
+    screen.on('display-removed', repositionToolbar);
+    screen.on('display-metrics-changed', repositionToolbar);
+
     toolbarWindow.webContents.once('did-finish-load', () => {
         if (!toolbarWindow || toolbarWindow.isDestroyed()) {
             return;
@@ -1267,6 +1371,9 @@ function createToolbarWindow(initialState) {
     });
 
     toolbarWindow.on('closed', () => {
+        screen.removeListener('display-added', repositionToolbar);
+        screen.removeListener('display-removed', repositionToolbar);
+        screen.removeListener('display-metrics-changed', repositionToolbar);
         toolbarCommandBroker.cancelAll();
         toolbarWindow = null;
     });
@@ -1419,7 +1526,11 @@ function createJitsiMeetWindow() {
             errorDescription,
             url: validatedURL,
         });
-        mainWindow.loadFile(resolveAppAssetPath('offline', 'offline.html'));
+        showMainRecoveryScreen('offline', {
+            errorCode,
+            errorDescription,
+            url: validatedURL,
+        });
     });
     mainWindow.webContents.on('did-frame-navigate', (_event, url, _code, _status, isMainFrame) => {
         const origin = normalizeWebOrigin(url);
@@ -1431,6 +1542,7 @@ function createJitsiMeetWindow() {
         if (isMainFrame) {
             if (getTrustedOriginPolicy().allows(origin)) {
                 lastFailedMainURL = null;
+                recoveryScreenActive = false;
             }
         } else {
             const mainOrigin = normalizeWebOrigin(mainWindow.webContents.getURL());
@@ -1441,10 +1553,15 @@ function createJitsiMeetWindow() {
         }
     });
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
-        recordDiagnosticEvent('main-render-process-gone', details || {});
+        const goneDetails = details || {};
+
+        recordDiagnosticEvent('main-render-process-gone', goneDetails);
+        if (goneDetails.reason !== 'clean-exit') {
+            showMainRecoveryScreen('crash', goneDetails);
+        }
     });
     mainWindow.webContents.on('unresponsive', () => {
-        recordDiagnosticEvent('main-window-unresponsive');
+        promptForUnresponsiveRenderer();
     });
     mainWindow.loadURL(indexURL);
 
@@ -1834,6 +1951,31 @@ ipcMain.handle('media-check:request-access', (event, kind) => {
 
     return requestNativeMediaAccess(kind);
 });
+ipcMain.handle('media-check:report-device-access', (event, result) => {
+    if (!isMediaCheckSender(event) || !result || !['camera', 'microphone'].includes(result.kind)) {
+        return { ok: false, reason: 'untrusted-or-invalid' };
+    }
+
+    const status = classifyDeviceAccessResult(result);
+
+    permissionState[result.kind] = sanitizeDiagnosticValue({
+        status,
+        permission: result.kind,
+        updatedAt: new Date().toISOString(),
+        details: {
+            source: 'media-check-device-request',
+            errorName: result.errorName || null,
+        },
+    });
+    recordDiagnosticEvent('media-device-access-result', {
+        kind: result.kind,
+        status,
+        errorName: result.errorName || null,
+    });
+    notifyMediaStatusChanged();
+
+    return { ok: true, status };
+});
 ipcMain.handle('media-check:open-settings', (event, kind) => {
     if (!isMediaCheckSender(event)) {
         return { ok: false, reason: 'untrusted-sender' };
@@ -1864,6 +2006,7 @@ ipcMain.on('app:retry', (event) => {
     const retryURL = normalizeWebOrigin(lastFailedMainURL) ? lastFailedMainURL : hashMeetServerURL;
 
     recordDiagnosticEvent('main-window-retry', { url: retryURL });
+    recoveryScreenActive = false;
     mainWindow.loadURL(retryURL);
 });
 ipcMain.handle('app:copy-diagnostics', (event) =>
@@ -1926,6 +2069,17 @@ ipcMain.on('toolbar:close', (event) => {
         return;
     }
     closeToolbarWindow();
+});
+
+ipcMain.on('toolbar:return-focus', (event) => {
+    const fromToolbar = toolbarWindow && !toolbarWindow.isDestroyed() && event.sender === toolbarWindow.webContents;
+
+    if (!fromToolbar || !mainWindow || mainWindow.isDestroyed()) {
+        return;
+    }
+
+    mainWindow.show();
+    mainWindow.focus();
 });
 
 /**
