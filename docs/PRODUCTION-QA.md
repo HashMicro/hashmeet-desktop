@@ -33,7 +33,10 @@ Run this checklist before marking a desktop release production-ready.
 - The toolbar opens on the shared display and is excluded from the captured image.
 - Toolbar does not cover the meeting header or overlap its own controls.
 - Closing the main window hides to tray; Quit exits the app.
+- The first close explains that HashMeet is still running, and later closes do not repeat the notice.
+- While a meeting is active, Home, reload, force reload, and a different-meeting deeplink require confirmation.
 - `hashmeet://meeting/<meeting-id>` opens the target meeting.
+- A deeplink restores a window hidden to tray; a current-meeting deeplink does not reload the call.
 - Unsupported `hashmeet://` routes are rejected.
 - External HTTP and HTTPS links open in the system browser.
 - Non-web external protocols are not opened from the renderer.
@@ -57,8 +60,10 @@ Run this checklist before marking a desktop release production-ready.
 2. Launch and sign in.
 3. Publish the new test release.
 4. Confirm the app detects the update.
-5. Restart from the update prompt.
-6. Confirm the installed version changed and meetings still work.
+5. During a meeting, confirm restart is deferred and the tray reports that the update is ready.
+6. Leave the meeting and confirm HashMeet offers Later and Restart now.
+7. Restart from the update prompt.
+8. Confirm the installed version changed and meetings still work.
 
 ## Acceptance Criteria
 

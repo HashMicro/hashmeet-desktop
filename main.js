@@ -8,6 +8,7 @@ const {
 const {
     BrowserWindow,
     Menu,
+    Notification,
     Tray,
     app,
     clipboard,
@@ -35,8 +36,17 @@ const { CHROME_CSS_INSERT_OPTIONS, getChromeLayout } = require('./lib/chrome-lay
 const { createDisplayMediaGrant } = require('./lib/display-media-policy');
 const { getScreenShareCapabilities, normalizePermissionStatus } = require('./lib/media-policy');
 const { createOriginPolicy, isTrustedIpcSender, normalizeWebOrigin } = require('./lib/origin-policy');
+const { PREFERENCE_KEYS, createUserDataPreferenceStore } = require('./lib/preference-store');
 const { createToolbarCommandBroker } = require('./lib/toolbar-command-broker');
-const { classifyDeviceAccessResult, getMediaPermissionTargets, getToolbarWindowBounds } = require('./lib/ux-policy');
+const {
+    classifyDeviceAccessResult,
+    getDestructiveNavigationDecision,
+    getMediaPermissionTargets,
+    getToolbarWindowBounds,
+    getTrayPresentation,
+    getUpdaterPresentation,
+    shouldShowCloseToTrayNotice,
+} = require('./lib/ux-policy');
 const pkgJson = require('./package.json');
 
 const showDevTools = Boolean(process.env.SHOW_DEV_TOOLS) || process.argv.includes('--show-dev-tools');
@@ -98,6 +108,15 @@ function resolveServerURL() {
 
 const hashMeetServerURL = resolveServerURL();
 let updateState = { status: 'idle' };
+let manualUpdateCheckPending = false;
+let updatePromptActive = false;
+let updatePromptDismissed = false;
+let deferredUpdatePrompt = false;
+let navigationPromptActive = false;
+let preferenceStore = null;
+let closeToTrayNotification = null;
+let mainWindowHasBeenShown = false;
+let pendingProtocolCall = null;
 const trustedWebOrigins = new Set([normalizeWebOrigin(hashMeetServerURL)].filter(Boolean));
 
 function getTrustedOriginPolicy() {
@@ -152,6 +171,117 @@ function buildHashMeetURL(relativePath = '') {
     return cleanPath ? `${hashMeetServerURL}/${cleanPath}` : hashMeetServerURL;
 }
 
+function getMeetingIdFromURL(value) {
+    try {
+        const parsed = new URL.URL(value);
+        const match = parsed.pathname.match(/(?:^|\/)meeting\/([^/]+)\/?$/);
+
+        return match ? decodeURIComponent(match[1]) : null;
+    } catch (_error) {
+        return null;
+    }
+}
+
+function showAndFocusMainWindow() {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+        return false;
+    }
+    if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+    }
+    if (!mainWindowHasBeenShown && !mainWindow.isVisible()) {
+        return true;
+    }
+    if (!mainWindow.isVisible()) {
+        mainWindow.show();
+    }
+    mainWindow.focus();
+
+    return true;
+}
+
+function syncNativeMenus() {
+    if (!app.isReady()) {
+        return;
+    }
+    setApplicationMenu();
+    updateTrayMenu();
+}
+
+async function confirmDestructiveNavigation(action, targetURL = null) {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+        return false;
+    }
+
+    const decision = getDestructiveNavigationDecision({
+        action,
+        targetMeetingId: getMeetingIdFromURL(targetURL),
+        currentMeetingId: getMeetingIdFromURL(mainWindow.webContents.getURL()),
+        callState,
+    });
+
+    if (!decision.requiresConfirmation) {
+        return true;
+    }
+
+    if (navigationPromptActive) {
+        recordDiagnosticEvent('destructive-navigation-cancelled', {
+            action,
+            reason: 'confirmation-already-open',
+        });
+
+        return false;
+    }
+
+    navigationPromptActive = true;
+
+    try {
+        const result = await dialog.showMessageBox(mainWindow, {
+            type: 'warning',
+            buttons: ['Cancel', 'Leave & continue'],
+            defaultId: 0,
+            cancelId: 0,
+            title: 'Leave the current meeting?',
+            message: 'This action will leave your current meeting.',
+            detail: 'Your camera, microphone, and screen share will stop for this meeting.',
+            noLink: true,
+        });
+        const confirmed = result.response === 1;
+
+        recordDiagnosticEvent(confirmed ? 'destructive-navigation-confirmed' : 'destructive-navigation-cancelled', {
+            action,
+            reason: decision.reason,
+        });
+
+        return confirmed;
+    } catch (error) {
+        recordDiagnosticEvent('destructive-navigation-dialog-error', {
+            action,
+            message: error.message,
+        });
+
+        return false;
+    } finally {
+        navigationPromptActive = false;
+    }
+}
+
+async function navigateMainWindow(action, targetURL = null) {
+    if (!showAndFocusMainWindow() || !(await confirmDestructiveNavigation(action, targetURL))) {
+        return false;
+    }
+
+    if (action === 'reload') {
+        mainWindow.reload();
+    } else if (action === 'force-reload') {
+        mainWindow.webContents.reloadIgnoringCache();
+    } else if (targetURL) {
+        mainWindow.loadURL(targetURL);
+    }
+
+    return true;
+}
+
 // Fix screen-sharing thumbnails being missing sometimes.
 // https://github.com/electron/electron/issues/44504
 const disabledFeatures = [
@@ -179,32 +309,217 @@ app.commandLine.appendSwitch('disable-background-timer-throttling');
 autoUpdater.logger = require('electron-log');
 autoUpdater.logger.transports.file.level = 'info';
 
+async function showUpdateMessage(options) {
+    const owner = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+
+    if (owner) {
+        showAndFocusMainWindow();
+    }
+
+    return dialog.showMessageBox(owner, options);
+}
+
+async function promptForDownloadedUpdate({ force = false, source = 'automatic' } = {}) {
+    const presentation = getUpdaterPresentation({ updateState, callState });
+
+    if (presentation.deferPrompt) {
+        if (!deferredUpdatePrompt) {
+            recordDiagnosticEvent('update-restart-deferred', {
+                version: updateState.version,
+                source,
+            });
+        }
+        deferredUpdatePrompt = true;
+        syncNativeMenus();
+
+        return false;
+    }
+
+    if (!presentation.canRestartNow || updatePromptActive || (!force && updatePromptDismissed)) {
+        return false;
+    }
+
+    updatePromptActive = true;
+    deferredUpdatePrompt = false;
+
+    try {
+        const result = await showUpdateMessage({
+            type: 'info',
+            buttons: ['Later', 'Restart now'],
+            defaultId: 1,
+            cancelId: 0,
+            title: 'HashMeet update ready',
+            message: `HashMeet ${updateState.version || 'update'} is ready to install.`,
+            detail: 'Restart HashMeet to finish the update.',
+            noLink: true,
+        });
+
+        if (result.response !== 1) {
+            updatePromptDismissed = true;
+            recordDiagnosticEvent('update-restart-later', {
+                version: updateState.version,
+                source,
+            });
+
+            return false;
+        }
+
+        if (callState.inMeeting) {
+            deferredUpdatePrompt = true;
+            recordDiagnosticEvent('update-restart-deferred', {
+                version: updateState.version,
+                source: 'meeting-started-before-restart',
+            });
+
+            return false;
+        }
+
+        recordDiagnosticEvent('update-restart-requested', {
+            version: updateState.version,
+            source,
+        });
+        isQuitting = true;
+        autoUpdater.quitAndInstall(false, true);
+
+        return true;
+    } catch (error) {
+        isQuitting = false;
+        recordDiagnosticEvent('update-restart-error', { message: error.message });
+        await showUpdateMessage({
+            type: 'error',
+            buttons: ['OK'],
+            title: 'Could not restart HashMeet',
+            message: 'The update is downloaded, but HashMeet could not restart.',
+            detail: 'Quit and reopen HashMeet to try installing the update again.',
+        });
+
+        return false;
+    } finally {
+        updatePromptActive = false;
+        syncNativeMenus();
+    }
+}
+
+async function checkForDesktopUpdates() {
+    if (!app.isPackaged || process.mas) {
+        return;
+    }
+
+    if (updateState.status === 'downloaded') {
+        if (callState.inMeeting) {
+            deferredUpdatePrompt = true;
+            await showUpdateMessage({
+                type: 'info',
+                buttons: ['OK'],
+                title: 'Update ready after your meeting',
+                message: `HashMeet ${updateState.version || 'update'} is ready to install.`,
+                detail: 'Your meeting will not be interrupted. HashMeet will ask to restart after you leave.',
+            });
+
+            return;
+        }
+        await promptForDownloadedUpdate({ force: true, source: 'manual' });
+
+        return;
+    }
+
+    if (['checking', 'available', 'downloading'].includes(updateState.status)) {
+        const presentation = getUpdaterPresentation({ updateState, callState });
+
+        manualUpdateCheckPending = true;
+        await showUpdateMessage({
+            type: 'info',
+            buttons: ['OK'],
+            title: 'HashMeet update',
+            message: presentation.label,
+        });
+
+        return;
+    }
+
+    manualUpdateCheckPending = true;
+    updateState = { status: 'checking', checkedAt: new Date().toISOString() };
+    syncNativeMenus();
+
+    try {
+        await autoUpdater.checkForUpdates();
+    } catch (error) {
+        // electron-updater normally emits `error`; handle providers that only reject.
+        if (manualUpdateCheckPending) {
+            manualUpdateCheckPending = false;
+            updateState = { status: 'error', message: error.message };
+            recordDiagnosticEvent('update-error', updateState);
+            syncNativeMenus();
+            await showUpdateMessage({
+                type: 'error',
+                buttons: ['OK'],
+                title: 'Could not check for updates',
+                message: 'HashMeet could not check for updates.',
+                detail: 'Check your connection and try again.',
+            });
+        }
+    }
+}
+
 autoUpdater.on('checking-for-update', () => {
     updateState = { status: 'checking', checkedAt: new Date().toISOString() };
     recordDiagnosticEvent('update-checking');
+    syncNativeMenus();
 });
 autoUpdater.on('update-available', (info) => {
     updateState = { status: 'available', version: info.version };
     recordDiagnosticEvent('update-available', updateState);
+    syncNativeMenus();
 });
 autoUpdater.on('update-not-available', (info) => {
     updateState = { status: 'current', version: info.version };
     recordDiagnosticEvent('update-not-available', updateState);
+    syncNativeMenus();
+    if (manualUpdateCheckPending) {
+        manualUpdateCheckPending = false;
+        showUpdateMessage({
+            type: 'info',
+            buttons: ['OK'],
+            title: 'HashMeet is up to date',
+            message: `You are using the latest version of HashMeet (${app.getVersion()}).`,
+        });
+    }
 });
 autoUpdater.on('download-progress', (progress) => {
+    const percent = Math.round(progress.percent || 0);
+    const shouldRefreshMenus = updateState.status !== 'downloading' || updateState.percent !== percent;
+
     updateState = {
         status: 'downloading',
-        percent: Math.round(progress.percent || 0),
+        percent,
         version: updateState.version,
     };
+    if (shouldRefreshMenus) {
+        syncNativeMenus();
+    }
 });
 autoUpdater.on('update-downloaded', (info) => {
     updateState = { status: 'downloaded', version: info.version };
+    updatePromptDismissed = false;
     recordDiagnosticEvent('update-downloaded', updateState);
+    syncNativeMenus();
+    promptForDownloadedUpdate({ source: manualUpdateCheckPending ? 'manual' : 'automatic' });
+    manualUpdateCheckPending = false;
 });
 autoUpdater.on('error', (err) => {
     updateState = { status: 'error', message: err.message };
     recordDiagnosticEvent('update-error', updateState);
+    syncNativeMenus();
+    if (manualUpdateCheckPending) {
+        manualUpdateCheckPending = false;
+        showUpdateMessage({
+            type: 'error',
+            buttons: ['OK'],
+            title: 'Could not check for updates',
+            message: 'HashMeet could not check for updates.',
+            detail: 'Check your connection and try again.',
+        });
+    }
 });
 
 // Enable context menu so things like copy and paste work in input fields.
@@ -843,9 +1158,7 @@ function setApplicationMenu() {
                     label: 'Home',
                     accelerator: 'CmdOrCtrl+Shift+H',
                     click: () => {
-                        if (mainWindow) {
-                            mainWindow.loadURL(homeURL);
-                        }
+                        navigateMainWindow('home', homeURL);
                     },
                 },
                 { type: 'separator' },
@@ -853,18 +1166,14 @@ function setApplicationMenu() {
                     label: 'Reload',
                     accelerator: 'CmdOrCtrl+R',
                     click: () => {
-                        if (mainWindow) {
-                            mainWindow.reload();
-                        }
+                        navigateMainWindow('reload');
                     },
                 },
                 {
                     label: 'Force Reload',
                     accelerator: 'CmdOrCtrl+Shift+R',
                     click: () => {
-                        if (mainWindow) {
-                            mainWindow.webContents.reloadIgnoringCache();
-                        }
+                        navigateMainWindow('force-reload');
                     },
                 },
                 ...(isMac ? [] : [{ type: 'separator' }, quitItem]),
@@ -933,15 +1242,12 @@ function setApplicationMenu() {
                     click: () => createMediaCheckWindow(),
                 },
                 {
-                    label: 'Check for Updates',
+                    label:
+                        updateState.status === 'downloaded'
+                            ? 'Restart to update'
+                            : getUpdaterPresentation({ updateState, callState }).label,
                     enabled: app.isPackaged && !process.mas,
-                    click: () => {
-                        updateState = { status: 'checking', checkedAt: new Date().toISOString() };
-                        autoUpdater.checkForUpdatesAndNotify().catch((err) => {
-                            updateState = { status: 'error', message: err.message };
-                            recordDiagnosticEvent('update-error', updateState);
-                        });
-                    },
+                    click: () => checkForDesktopUpdates(),
                 },
                 { type: 'separator' },
                 {
@@ -992,49 +1298,116 @@ function createTray() {
         return;
     }
     tray.setToolTip('HashMeet');
-    tray.setContextMenu(
-        Menu.buildFromTemplate([
-            {
-                label: 'Show HashMeet',
-                click: () => {
-                    if (mainWindow) {
-                        if (mainWindow.isMinimized()) {
-                            mainWindow.restore();
-                        }
-                        mainWindow.show();
-                        mainWindow.focus();
-                    }
-                },
-            },
-            {
-                label: 'Audio & Video Setup',
-                click: () => createMediaCheckWindow(),
-            },
-            { type: 'separator' },
-            {
-                label: 'Quit',
-                click: () => {
-                    isQuitting = true;
-                    app.quit();
-                },
-            },
-        ]),
-    );
+    updateTrayMenu();
 
     tray.on('click', () => {
         if (!mainWindow) {
             return;
         }
-        if (mainWindow.isVisible() && !mainWindow.isMinimized()) {
+        const presentation = getTrayPresentation({ callState, updateState });
+
+        if (mainWindow.isVisible() && !mainWindow.isMinimized() && !presentation.disableHideOnClick) {
             mainWindow.hide();
         } else {
-            if (mainWindow.isMinimized()) {
-                mainWindow.restore();
-            }
-            mainWindow.show();
-            mainWindow.focus();
+            showAndFocusMainWindow();
         }
     });
+}
+
+function updateTrayMenu() {
+    if (!tray) {
+        return;
+    }
+
+    const presentation = getTrayPresentation({ callState, updateState });
+    const template = [
+        {
+            label: presentation.primaryLabel,
+            click: () => showAndFocusMainWindow(),
+        },
+        ...(presentation.statusLabel ? [{ label: presentation.statusLabel, enabled: false }] : []),
+        ...(presentation.showRestartToUpdate
+            ? [
+                  {
+                      label: 'Restart to update',
+                      enabled: presentation.restartEnabled,
+                      click: () => promptForDownloadedUpdate({ force: true, source: 'tray' }),
+                  },
+              ]
+            : []),
+        { type: 'separator' },
+        {
+            label: 'Audio & Video Setup',
+            click: () => createMediaCheckWindow(),
+        },
+        {
+            label: 'Copy Diagnostics',
+            click: () => copyDiagnosticsToClipboard(),
+        },
+        { type: 'separator' },
+        {
+            label: 'Quit',
+            click: () => {
+                isQuitting = true;
+                app.quit();
+            },
+        },
+    ];
+
+    tray.setToolTip(callState.inMeeting ? 'HashMeet - meeting in progress' : 'HashMeet');
+    tray.setContextMenu(Menu.buildFromTemplate(template));
+}
+
+function showCloseToTrayNotice() {
+    const hasShownCloseNotice = preferenceStore?.get(PREFERENCE_KEYS.closeToTrayNoticeShown, false) === true;
+
+    if (!shouldShowCloseToTrayNotice({ hasShownCloseNotice, willHideToTray: true })) {
+        return;
+    }
+
+    const body = callState.inMeeting
+        ? 'Your meeting continues in the system tray. Choose Return to meeting or Quit from the tray.'
+        : 'Open HashMeet from the system tray, or choose Quit there to close the app.';
+    const markNoticeShown = (delivery) => {
+        preferenceStore?.set(PREFERENCE_KEYS.closeToTrayNoticeShown, true);
+        recordDiagnosticEvent('close-to-tray-notice-shown', {
+            inMeeting: callState.inMeeting,
+            delivery,
+        });
+    };
+
+    try {
+        if (Notification.isSupported()) {
+            closeToTrayNotification = new Notification({
+                title: 'HashMeet is still running',
+                body,
+                silent: true,
+            });
+            closeToTrayNotification.on('click', () => showAndFocusMainWindow());
+            closeToTrayNotification.on('close', () => {
+                closeToTrayNotification = null;
+            });
+            closeToTrayNotification.show();
+            markNoticeShown('notification');
+
+            return;
+        }
+    } catch (error) {
+        recordDiagnosticEvent('close-to-tray-notification-error', { message: error.message });
+    }
+
+    dialog
+        .showMessageBox({
+            type: 'info',
+            buttons: ['Got it'],
+            title: 'HashMeet is still running',
+            message: 'HashMeet is still running in the system tray.',
+            detail: body,
+        })
+        .then(() => markNoticeShown('dialog'))
+        .catch((error) => {
+            recordDiagnosticEvent('close-to-tray-notice-unavailable', { message: error.message });
+        });
 }
 
 async function refreshChromeCSS(targetWindow) {
@@ -1438,7 +1811,11 @@ function createJitsiMeetWindow() {
 
     // Check for Updates.
     if (app.isPackaged && !process.mas) {
-        autoUpdater.checkForUpdatesAndNotify();
+        autoUpdater.checkForUpdates().catch((err) => {
+            updateState = { status: 'error', message: err.message };
+            recordDiagnosticEvent('update-error', updateState);
+            syncNativeMenus();
+        });
     }
 
     // Load the previous window state with fallback to defaults.
@@ -1685,12 +2062,14 @@ function createJitsiMeetWindow() {
         if (!isQuitting) {
             ev.preventDefault();
             mainWindow.hide();
+            showCloseToTrayNotice();
         }
     });
 
     mainWindow.on('closed', () => {
         chromeCSSGeneration += 1;
         chromeCSSKey = null;
+        mainWindowHasBeenShown = false;
         mainWindow = null;
         closeToolbarWindow();
     });
@@ -1705,6 +2084,7 @@ function createJitsiMeetWindow() {
     });
 
     mainWindow.once('ready-to-show', () => {
+        mainWindowHasBeenShown = true;
         mainWindow.show();
     });
 
@@ -1780,7 +2160,7 @@ function getSupportedProtocolRoute(fullProtocolCall) {
  * Handler for hashmeet:// protocol links. Navigates the main window to
  * the corresponding meet.hashmicro.com URL.
  */
-function handleProtocolCall(fullProtocolCall) {
+async function handleProtocolCall(fullProtocolCall) {
     if (!fullProtocolCall || fullProtocolCall.trim() === '' || fullProtocolCall.indexOf(appProtocolSurplus) !== 0) {
         return;
     }
@@ -1798,15 +2178,48 @@ function handleProtocolCall(fullProtocolCall) {
 
     const target = buildHashMeetURL(route);
 
-    if (app.isReady() && mainWindow === null) {
+    if (!app.isReady()) {
+        pendingProtocolCall = fullProtocolCall;
+        recordDiagnosticEvent('protocol-link-queued', {
+            route: route ? 'meeting' : 'home',
+        });
+
+        return;
+    }
+
+    if (mainWindow === null) {
         createJitsiMeetWindow();
     }
 
     if (mainWindow) {
+        const wasHidden = !mainWindow.isVisible();
+        const wasMinimized = mainWindow.isMinimized();
+
+        showAndFocusMainWindow();
+        if (wasHidden || wasMinimized) {
+            recordDiagnosticEvent('protocol-link-window-restored', {
+                wasHidden,
+                wasMinimized,
+            });
+        }
+
+        const currentMeetingId = getMeetingIdFromURL(mainWindow.webContents.getURL());
+        const targetMeetingId = getMeetingIdFromURL(target);
+
+        if (currentMeetingId && targetMeetingId && currentMeetingId === targetMeetingId) {
+            recordDiagnosticEvent('protocol-link-opened', {
+                route: 'current-meeting',
+            });
+
+            return;
+        }
+
+        if (!(await navigateMainWindow('deep-link', target))) {
+            return;
+        }
         recordDiagnosticEvent('protocol-link-opened', {
-            route: route || 'home',
+            route: route ? 'meeting' : 'home',
         });
-        mainWindow.loadURL(target);
     }
 }
 
@@ -1828,9 +2241,8 @@ if (!gotInstanceLock) {
 app.on('activate', () => {
     if (mainWindow === null) {
         createJitsiMeetWindow();
-    } else if (!mainWindow.isVisible()) {
-        mainWindow.show();
-        mainWindow.focus();
+    } else {
+        showAndFocusMainWindow();
     }
 });
 
@@ -1859,7 +2271,20 @@ app.on(
     },
 );
 
-app.on('ready', createJitsiMeetWindow);
+app.on('ready', () => {
+    preferenceStore = createUserDataPreferenceStore(app, {
+        recordDiagnostic: recordDiagnosticEvent,
+    });
+    if (!mainWindow) {
+        createJitsiMeetWindow();
+    }
+    if (pendingProtocolCall) {
+        const protocolCall = pendingProtocolCall;
+
+        pendingProtocolCall = null;
+        handleProtocolCall(protocolCall);
+    }
+});
 
 if (isDev) {
     app.on('ready', createWebRTCInternalsWindow);
@@ -1871,8 +2296,7 @@ app.on('second-instance', (event, commandLine) => {
      * existing window.
      */
     if (mainWindow) {
-        mainWindow.isMinimized() && mainWindow.restore();
-        mainWindow.focus();
+        showAndFocusMainWindow();
 
         /**
          * This is for windows [win32]
@@ -2106,13 +2530,18 @@ ipcMain.on('call:set-state', (event, state) => {
         return;
     }
 
+    const wasInMeeting = callState.inMeeting;
+
     callState = {
         inMeeting: state.inMeeting === true,
         muted: state.muted !== false,
         sharing: state.sharing === true,
     };
     recordDiagnosticEvent('call-state-changed', callState);
-    if (tray) {
-        tray.setToolTip(callState.inMeeting ? 'HashMeet - meeting in progress' : 'HashMeet');
+    syncNativeMenus();
+
+    if (wasInMeeting && !callState.inMeeting && deferredUpdatePrompt) {
+        recordDiagnosticEvent('update-restart-defer-ended', { version: updateState.version });
+        promptForDownloadedUpdate({ source: 'meeting-ended' });
     }
 });

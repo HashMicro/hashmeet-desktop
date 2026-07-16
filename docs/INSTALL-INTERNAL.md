@@ -68,7 +68,9 @@ Ubuntu-based distributions.
 ## Auto-updates
 
 The app checks GitHub Releases on launch. When an update is ready, restart the
-app from the update prompt and confirm the version changed.
+app from the update prompt and confirm the version changed. HashMeet defers the
+restart prompt until after an active meeting ends; **Help -> Restart to update**
+and the tray show the ready state in the meantime.
 
 ## Reporting Issues
 
